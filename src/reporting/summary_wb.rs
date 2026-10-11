@@ -23,14 +23,14 @@ use super::summary_data::{
 /// Generate Workbook 1: 国补上传情况汇总.xlsx (5 Sheets)
 pub fn generate_summary_workbook(input_dir: &Path, output_path: &Path) -> Result<(), String> {
     let inputs = CommonInputs::load(input_dir)?;
-    generate_with_inputs(input_dir, output_path, &inputs)
+    generate_with_inputs(input_dir, output_path, &inputs).map(|_| ())
 }
 
 pub(crate) fn generate_with_inputs(
     input_dir: &Path,
     output_path: &Path,
     inputs: &CommonInputs,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let mut workbook = Workbook::new();
     let styles = StylePool::default();
 
@@ -55,7 +55,7 @@ pub(crate) fn generate_with_inputs(
     // Precalculate shared metrics and lookup structures once
     let metrics = SummaryMetrics::calculate(sales_rows, app_upload_rows, dig_upload_rows)?;
     let category_brands = CategoryBrandSummary::from_sales(sales_rows)?;
-    let invoice_name_map = build_invoice_name_map(invoice_rows)?;
+    let (invoice_name_map, invoice_name_warning) = build_invoice_name_map(invoice_rows)?;
 
     let colors = AnomalyColors {
         app_pink: app_pink_rows,
@@ -118,7 +118,11 @@ pub(crate) fn generate_with_inputs(
         .save(output_path)
         .map_err(|e| format!("保存工作簿一失败: {}", e))?;
 
-    Ok(())
+    let mut warnings = Vec::new();
+    if let Some(warning) = invoice_name_warning {
+        warnings.push(warning);
+    }
+    Ok(warnings)
 }
 
 fn build_summary_sheet(wb: &mut Workbook, s: &StylePool, m: &SummaryMetrics) -> Result<(), String> {

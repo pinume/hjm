@@ -11,14 +11,14 @@ use super::styles::StylePool;
 /// Generate Workbook 2: 26年国补门店财务统筹表.xlsx (4 Sheets)
 pub fn generate_store_finance_workbook(input_dir: &Path, output_path: &Path) -> Result<(), String> {
     let inputs = CommonInputs::load(input_dir)?;
-    generate_with_inputs(input_dir, output_path, &inputs)
+    generate_with_inputs(input_dir, output_path, &inputs).map(|_| ())
 }
 
 pub(crate) fn generate_with_inputs(
     input_dir: &Path,
     output_path: &Path,
     inputs: &CommonInputs,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let mut workbook = Workbook::new();
     let styles = StylePool::default();
 
@@ -33,7 +33,7 @@ pub(crate) fn generate_with_inputs(
     let dig_store_code = &inputs.dig_store_code;
 
     // Build Sheet 1: 最终匹配表（全部的国补发生数据上匹配）
-    build_final_match_sheet(
+    let warnings = build_final_match_sheet(
         &mut workbook,
         &styles,
         &store_occ_rows,
@@ -63,7 +63,7 @@ pub(crate) fn generate_with_inputs(
         .save(output_path)
         .map_err(|e| format!("保存工作簿二失败: {}", e))?;
 
-    Ok(())
+    Ok(warnings)
 }
 
 fn build_final_match_sheet(
@@ -74,7 +74,7 @@ fn build_final_match_sheet(
     dig_up: &SheetData,
     invoices: &SheetData,
     sales: &SheetData,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let ws = wb.add_worksheet();
     ws.set_name("最终匹配表（全部的国补发生数据上匹配）")
         .map_err(|e| e.to_string())?;
@@ -184,7 +184,7 @@ fn build_final_match_sheet(
             .map_err(|e| e.to_string())?;
     }
 
-    Ok(())
+    Ok(reconciler.warnings())
 }
 
 fn build_store_occurrence_sheet(

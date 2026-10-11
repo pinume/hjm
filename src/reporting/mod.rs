@@ -8,3 +8,4 @@ mod reconciler;
 mod styles;
 pub(crate) mod summary_data;
 pub(crate) mod summary_wb;
+mod unique_index;

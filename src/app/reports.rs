@@ -42,7 +42,7 @@ pub(super) fn run_all(input: &Path, cleaned: &Path, success: &HashSet<Category>)
             "国补上传情况汇总",
             SUMMARY_DEPENDENCIES,
             summary_wb::generate_with_inputs
-                as fn(&Path, &Path, &CommonInputs) -> Result<(), String>,
+                as fn(&Path, &Path, &CommonInputs) -> Result<Vec<String>, String>,
         ),
         (
             "26年国补门店财务统筹表",
@@ -82,7 +82,12 @@ pub(super) fn run_all(input: &Path, cleaned: &Path, success: &HashSet<Category>)
             )))
         });
         match result {
-            Ok(()) => println!("[{stem}] 报表成功。"),
+            Ok(warnings) => {
+                for warning in warnings {
+                    println!("[{stem}] 注意：{warning}");
+                }
+                println!("[{stem}] 报表成功。");
+            }
             Err(error) => {
                 println!("[{stem}] 报表失败：{error}");
                 all_ok = false;
@@ -96,18 +101,19 @@ fn generate_and_publish(
     stem: &str,
     input: &Path,
     output: &Path,
-    generator: impl FnOnce(&Path, &Path) -> Result<(), String>,
-) -> Result<(), ProcessError> {
+    generator: impl FnOnce(&Path, &Path) -> Result<Vec<String>, String>,
+) -> Result<Vec<String>, ProcessError> {
     std::fs::create_dir_all(output)?;
     let temporary = publisher::temp_path(output, stem);
     let mut guard = publisher::TempFile::new(temporary.clone());
-    if let Err(error) = generator(input, &temporary).map_err(ProcessError::Read) {
-        return Err(guard.fail(error));
-    }
+    let warnings = match generator(input, &temporary).map_err(ProcessError::Read) {
+        Ok(warnings) => warnings,
+        Err(error) => return Err(guard.fail(error)),
+    };
     guard.disarm(); // publisher takes ownership of cleanup and rollback.
     let path = publisher::publish(output, &format!("{stem}.xlsx"), &temporary)?;
     println!("已发布：{}", path.display());
-    Ok(())
+    Ok(warnings)
 }
 
 #[cfg(test)]
@@ -177,7 +183,7 @@ mod tests {
                     match stage {
                         "generation" => Err("injected generation failure".into()),
                         "panic" => panic!("injected generation panic"),
-                        _ => Ok(()),
+                        _ => Ok(Vec::new()),
                     }
                 })
             });
@@ -190,7 +196,8 @@ mod tests {
             assert_eq!(std::fs::read(&xlsx).unwrap(), b"old xlsx");
             assert_eq!(std::fs::read_dir(&output).unwrap().count(), 1);
             generate_and_publish("finance", &output, &output, |_, path| {
-                std::fs::write(path, b"finance").map_err(|error| error.to_string())
+                std::fs::write(path, b"finance").map_err(|error| error.to_string())?;
+                Ok(Vec::new())
             })
             .unwrap();
             assert_eq!(

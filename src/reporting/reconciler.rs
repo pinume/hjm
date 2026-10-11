@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::data::SheetData;
 use super::reader::{UploadColumns, cell_to_string};
+use super::unique_index::UniqueIndex;
 
 /// 商品信息（零拷贝借用）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,13 +46,13 @@ struct ProductEntry {
     model: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct UploadEntry {
     status: String,
     invoice_no: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct InvoiceEntry {
     invoice_type: String,
     invoice_status: String,
@@ -64,8 +65,8 @@ pub(crate) struct TransactionReconciler {
     sales_map: HashMap<String, Option<ProductEntry>>,
     sales_documents: HashMap<String, Option<String>>,
     blue_invoices: HashMap<String, String>,
-    upload_map: HashMap<String, UploadEntry>,
-    invoice_map: HashMap<String, InvoiceEntry>,
+    upload_map: UniqueIndex<UploadEntry>,
+    invoice_map: UniqueIndex<InvoiceEntry>,
 }
 
 impl TransactionReconciler {
@@ -92,7 +93,7 @@ impl TransactionReconciler {
         let inv_doc_idx = inv_h.require("匹配单据号", "发票明细.xlsx")?;
 
         // Build index for uploaded records (appliance + digital).
-        let mut upload_map = HashMap::new();
+        let mut upload_map = UniqueIndex::default();
         for (rows, cols) in [(app_upload, app_cols), (dig_upload, dig_cols)] {
             for row in &rows[1..] {
                 let reference_no = cell_to_string(&row[cols.reference]);
@@ -109,7 +110,7 @@ impl TransactionReconciler {
         }
 
         // Index invoices and their parsed product fields by invoice number.
-        let mut invoice_map = HashMap::new();
+        let mut invoice_map = UniqueIndex::default();
         let mut blue_candidates: HashMap<String, (HashSet<String>, HashSet<String>)> =
             HashMap::new();
         for row in &invoices[1..] {
@@ -266,6 +267,17 @@ impl TransactionReconciler {
             invoice_no,
             is_red_flush,
         }
+    }
+
+    pub(crate) fn warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if let Some(warning) = self.upload_map.warning("已上传明细索引") {
+            warnings.push(warning);
+        }
+        if let Some(warning) = self.invoice_map.warning("发票明细索引") {
+            warnings.push(warning);
+        }
+        warnings
     }
 }
 
@@ -836,6 +848,304 @@ mod tests {
                 brand: "创维",
                 model: "创维-彩电-75A3D 4K超高清",
             })
+        );
+    }
+
+    #[test]
+    fn conflicting_upload_reference_falls_back_to_unsubmitted_and_reports_warning() {
+        use calamine::Data;
+        let app_upload = SheetData::new(vec![
+            vec![
+                Data::String("检索参考号".to_string()),
+                Data::String("状态".to_string()),
+                Data::String("发票号码".to_string()),
+                Data::String("补贴金额".to_string()),
+            ],
+            vec![
+                Data::String("ref-dup".to_string()),
+                Data::String("待审核".to_string()),
+                Data::String("inv-1".to_string()),
+                Data::String("100".to_string()),
+            ],
+            vec![
+                Data::String("ref-dup".to_string()),
+                Data::String("审核通过未回款".to_string()),
+                Data::String("inv-1".to_string()),
+                Data::String("100".to_string()),
+            ],
+        ]);
+        let dig_upload = SheetData::new(vec![vec![
+            Data::String("检索参考号".to_string()),
+            Data::String("状态".to_string()),
+            Data::String("发票号码".to_string()),
+            Data::String("补贴金额".to_string()),
+        ]]);
+        let invoices = SheetData::new(vec![vec![
+            Data::String("数电发票号码".to_string()),
+            Data::String("开票类型".to_string()),
+            Data::String("开票状态".to_string()),
+            Data::String("大类".to_string()),
+            Data::String("品牌".to_string()),
+            Data::String("主要商品名称".to_string()),
+            Data::String("匹配单据号".to_string()),
+        ]]);
+
+        let reconciler =
+            TransactionReconciler::from_inputs(&app_upload, &dig_upload, &invoices, &empty_sales())
+                .unwrap();
+        let res = reconciler.reconcile("ref-dup", "");
+        assert_eq!(res.status, "未提交");
+        assert_eq!(res.invoice_no, "");
+        assert_eq!(
+            reconciler.warnings(),
+            vec![
+                "已上传明细索引：1 个键对应多条内容不同的记录，已按未命中处理（ref-dup）"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn identical_upload_reference_across_rows_or_files_does_not_conflict() {
+        use calamine::Data;
+        let app_upload = SheetData::new(vec![
+            vec![
+                Data::String("检索参考号".to_string()),
+                Data::String("状态".to_string()),
+                Data::String("发票号码".to_string()),
+                Data::String("补贴金额".to_string()),
+            ],
+            vec![
+                Data::String("ref-same".to_string()),
+                Data::String("已回款".to_string()),
+                Data::String("inv-same".to_string()),
+                Data::String("100".to_string()),
+            ],
+        ]);
+        let dig_upload = SheetData::new(vec![
+            vec![
+                Data::String("检索参考号".to_string()),
+                Data::String("状态".to_string()),
+                Data::String("发票号码".to_string()),
+                Data::String("补贴金额".to_string()),
+            ],
+            vec![
+                Data::String("ref-same".to_string()),
+                Data::String("已回款".to_string()),
+                Data::String("inv-same".to_string()),
+                Data::String("100".to_string()),
+            ],
+        ]);
+        let invoices = SheetData::new(vec![vec![
+            Data::String("数电发票号码".to_string()),
+            Data::String("开票类型".to_string()),
+            Data::String("开票状态".to_string()),
+            Data::String("大类".to_string()),
+            Data::String("品牌".to_string()),
+            Data::String("主要商品名称".to_string()),
+            Data::String("匹配单据号".to_string()),
+        ]]);
+
+        let reconciler =
+            TransactionReconciler::from_inputs(&app_upload, &dig_upload, &invoices, &empty_sales())
+                .unwrap();
+        let res = reconciler.reconcile("ref-same", "");
+        assert_eq!(res.status, "已回款");
+        assert_eq!(res.invoice_no, "inv-same");
+        assert!(reconciler.warnings().is_empty());
+    }
+
+    #[test]
+    fn conflicting_invoice_falls_back_and_reports_warning() {
+        use calamine::Data;
+        let app_upload = SheetData::new(vec![
+            vec![
+                Data::String("检索参考号".to_string()),
+                Data::String("状态".to_string()),
+                Data::String("发票号码".to_string()),
+                Data::String("补贴金额".to_string()),
+            ],
+            vec![
+                Data::String("ref-inv-test".to_string()),
+                Data::String("已回款".to_string()),
+                Data::String("inv-conflict".to_string()),
+                Data::String("100".to_string()),
+            ],
+        ]);
+        let dig_upload = SheetData::new(vec![vec![
+            Data::String("检索参考号".to_string()),
+            Data::String("状态".to_string()),
+            Data::String("发票号码".to_string()),
+            Data::String("补贴金额".to_string()),
+        ]]);
+        let invoices = SheetData::new(vec![
+            vec![
+                Data::String("数电发票号码".to_string()),
+                Data::String("开票类型".to_string()),
+                Data::String("开票状态".to_string()),
+                Data::String("大类".to_string()),
+                Data::String("品牌".to_string()),
+                Data::String("主要商品名称".to_string()),
+                Data::String("匹配单据号".to_string()),
+            ],
+            vec![
+                Data::String("inv-conflict".to_string()),
+                Data::String("蓝票".to_string()),
+                Data::String("开票完成".to_string()),
+                Data::String("彩电".to_string()),
+                Data::String("创维".to_string()),
+                Data::String("型号A".to_string()),
+                Data::String("doc-1".to_string()),
+            ],
+            vec![
+                Data::String("inv-conflict".to_string()),
+                Data::String("蓝票".to_string()),
+                Data::String("已红冲".to_string()),
+                Data::String("彩电".to_string()),
+                Data::String("创维".to_string()),
+                Data::String("型号A".to_string()),
+                Data::String("doc-1".to_string()),
+            ],
+        ]);
+
+        let reconciler =
+            TransactionReconciler::from_inputs(&app_upload, &dig_upload, &invoices, &empty_sales())
+                .unwrap();
+        let res = reconciler.reconcile("ref-inv-test", "");
+        assert_eq!(res.status, "已回款");
+        assert_eq!(res.invoice_no, "inv-conflict");
+        // Because inv-conflict is ambiguous, red-flush check cannot rely on it, and product cannot rely on it
+        assert!(!res.is_red_flush);
+        assert_eq!(res.product, None);
+        assert_eq!(
+            reconciler.warnings(),
+            vec![
+                "发票明细索引：1 个键对应多条内容不同的记录，已按未命中处理（inv-conflict）"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn conflicting_upload_invoice_no_falls_back_and_reports_warning() {
+        use calamine::Data;
+        let app_upload = SheetData::new(vec![
+            vec![
+                Data::String("检索参考号".to_string()),
+                Data::String("状态".to_string()),
+                Data::String("发票号码".to_string()),
+                Data::String("补贴金额".to_string()),
+            ],
+            vec![
+                Data::String("ref-inv-diff".to_string()),
+                Data::String("已回款".to_string()),
+                Data::String("inv-A".to_string()),
+                Data::String("100".to_string()),
+            ],
+            vec![
+                Data::String("ref-inv-diff".to_string()),
+                Data::String("已回款".to_string()),
+                Data::String("inv-B".to_string()),
+                Data::String("100".to_string()),
+            ],
+        ]);
+        let dig_upload = SheetData::new(vec![vec![
+            Data::String("检索参考号".to_string()),
+            Data::String("状态".to_string()),
+            Data::String("发票号码".to_string()),
+            Data::String("补贴金额".to_string()),
+        ]]);
+        let invoices = SheetData::new(vec![vec![
+            Data::String("数电发票号码".to_string()),
+            Data::String("开票类型".to_string()),
+            Data::String("开票状态".to_string()),
+            Data::String("大类".to_string()),
+            Data::String("品牌".to_string()),
+            Data::String("主要商品名称".to_string()),
+            Data::String("匹配单据号".to_string()),
+        ]]);
+
+        let reconciler =
+            TransactionReconciler::from_inputs(&app_upload, &dig_upload, &invoices, &empty_sales())
+                .unwrap();
+        let res = reconciler.reconcile("ref-inv-diff", "");
+        assert_eq!(res.status, "未提交");
+        assert_eq!(res.invoice_no, "");
+        assert_eq!(
+            reconciler.warnings(),
+            vec![
+                "已上传明细索引：1 个键对应多条内容不同的记录，已按未命中处理（ref-inv-diff）"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn conflicting_invoice_product_falls_back_and_reports_warning() {
+        use calamine::Data;
+        let app_upload = SheetData::new(vec![
+            vec![
+                Data::String("检索参考号".to_string()),
+                Data::String("状态".to_string()),
+                Data::String("发票号码".to_string()),
+                Data::String("补贴金额".to_string()),
+            ],
+            vec![
+                Data::String("ref-prod-diff".to_string()),
+                Data::String("已回款".to_string()),
+                Data::String("inv-prod-diff".to_string()),
+                Data::String("100".to_string()),
+            ],
+        ]);
+        let dig_upload = SheetData::new(vec![vec![
+            Data::String("检索参考号".to_string()),
+            Data::String("状态".to_string()),
+            Data::String("发票号码".to_string()),
+            Data::String("补贴金额".to_string()),
+        ]]);
+        let invoices = SheetData::new(vec![
+            vec![
+                Data::String("数电发票号码".to_string()),
+                Data::String("开票类型".to_string()),
+                Data::String("开票状态".to_string()),
+                Data::String("大类".to_string()),
+                Data::String("品牌".to_string()),
+                Data::String("主要商品名称".to_string()),
+                Data::String("匹配单据号".to_string()),
+            ],
+            vec![
+                Data::String("inv-prod-diff".to_string()),
+                Data::String("蓝票".to_string()),
+                Data::String("开票完成".to_string()),
+                Data::String("彩电".to_string()),
+                Data::String("创维".to_string()),
+                Data::String("型号A".to_string()),
+                Data::String("doc-1".to_string()),
+            ],
+            vec![
+                Data::String("inv-prod-diff".to_string()),
+                Data::String("蓝票".to_string()),
+                Data::String("开票完成".to_string()),
+                Data::String("彩电".to_string()),
+                Data::String("海信".to_string()),
+                Data::String("型号B".to_string()),
+                Data::String("doc-1".to_string()),
+            ],
+        ]);
+
+        let reconciler =
+            TransactionReconciler::from_inputs(&app_upload, &dig_upload, &invoices, &empty_sales())
+                .unwrap();
+        let res = reconciler.reconcile("ref-prod-diff", "");
+        assert_eq!(res.status, "已回款");
+        assert_eq!(res.invoice_no, "inv-prod-diff");
+        assert_eq!(res.product, None);
+        assert_eq!(
+            reconciler.warnings(),
+            vec![
+                "发票明细索引：1 个键对应多条内容不同的记录，已按未命中处理（inv-prod-diff）"
+                    .to_string()
+            ]
         );
     }
 }

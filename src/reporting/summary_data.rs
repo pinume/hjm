@@ -1,5 +1,6 @@
 use super::data::SheetData;
 use super::reader::{HeaderMap, UploadColumns, cell_to_decimal, cell_to_string};
+use super::unique_index::UniqueIndex;
 use calamine::Data;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
@@ -297,7 +298,9 @@ impl CategoryBrandSummary {
     }
 }
 
-pub fn build_invoice_name_map(invoices: &SheetData) -> Result<HashMap<String, String>, String> {
+pub fn build_invoice_name_map(
+    invoices: &SheetData,
+) -> Result<(HashMap<String, String>, Option<String>), String> {
     let inv_h = &invoices.header;
     let inv_no_idx = inv_h
         .find(&["数电发票号码"])
@@ -305,15 +308,16 @@ pub fn build_invoice_name_map(invoices: &SheetData) -> Result<HashMap<String, St
     let inv_name_idx = inv_h
         .find(&["主要商品名称"])
         .ok_or("发票明细缺少主要商品名称")?;
-    let mut invoice_name_map = HashMap::new();
+    let mut index = UniqueIndex::default();
     for row in &invoices[1..] {
         let no = cell_to_string(&row[inv_no_idx]);
         let name = cell_to_string(&row[inv_name_idx]);
         if !no.is_empty() {
-            invoice_name_map.insert(no, name);
+            index.insert(no, name);
         }
     }
-    Ok(invoice_name_map)
+    let warning = index.warning("发票商品名称索引");
+    Ok((index.to_valid_map(), warning))
 }
 
 pub(crate) struct AnomalyColors {
@@ -544,6 +548,29 @@ mod tests {
                 records.invoices
             ),
             (vec![3, 1], vec![1, 3], vec![1, 4], vec![3], vec![1, 4])
+        );
+    }
+
+    #[test]
+    fn build_invoice_name_map_filters_out_conflicting_names_and_warns() {
+        use calamine::Data;
+        let rows = vec![
+            vec![
+                Data::String("数电发票号码".into()),
+                Data::String("主要商品名称".into()),
+            ],
+            vec![Data::String("INV1".into()), Data::String("商品A".into())],
+            vec![Data::String("INV1".into()), Data::String("商品B".into())],
+            vec![Data::String("INV2".into()), Data::String("商品C".into())],
+            vec![Data::String("INV2".into()), Data::String("商品C".into())],
+        ];
+        let invoices = SheetData::new(rows);
+        let (names, warning) = build_invoice_name_map(&invoices).unwrap();
+        assert_eq!(names.get("INV1"), None);
+        assert_eq!(names.get("INV2"), Some(&"商品C".to_string()));
+        assert_eq!(
+            warning.as_deref(),
+            Some("发票商品名称索引：1 个键对应多条内容不同的记录，已按未命中处理（INV1）")
         );
     }
 }
