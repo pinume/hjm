@@ -1,9 +1,8 @@
-use calamine::Data;
-use rust_xlsxwriter::{Workbook, Worksheet};
+use rust_xlsxwriter::Workbook;
 use std::path::Path;
 
 use super::data::{CellKind, CommonInputs, ReportColumn, SheetData};
-use super::excel::write_report_row;
+use super::excel::ReportSheetBuilder;
 use super::reader::{HeaderMap, cell_to_string};
 use super::reconciler::TransactionReconciler;
 use super::styles::StylePool;
@@ -75,20 +74,15 @@ fn build_final_match_sheet(
     invoices: &SheetData,
     sales: &SheetData,
 ) -> Result<Vec<String>, String> {
-    let ws = wb.add_worksheet();
-    ws.set_name("最终匹配表（全部的国补发生数据上匹配）")
-        .map_err(|e| e.to_string())?;
-    ws.set_freeze_panes(1, 0).map_err(|e| e.to_string())?;
+    let mut sheet = ReportSheetBuilder::new(wb, "最终匹配表（全部的国补发生数据上匹配）", s)?;
+    sheet.set_freeze_panes(1, 0)?;
 
     // 27 columns widths
     let widths = [
         8.0, 20.0, 20.0, 14.0, 12.0, 22.0, 14.0, 14.0, 12.0, 16.0, 18.0, 12.0, 16.0, 18.0, 24.0,
         16.0, 28.0, 28.0, 14.0, 16.0, 14.0, 14.0, 16.0, 26.0, 16.0, 24.0, 14.0,
     ];
-    for (col, w) in widths.iter().enumerate() {
-        ws.set_column_width(col as u16, *w)
-            .map_err(|e| e.to_string())?;
-    }
+    sheet.set_column_widths(&widths)?;
 
     // Headers
     let headers = [
@@ -120,17 +114,9 @@ fn build_final_match_sheet(
         "发票号",
         "发票是否红冲",
     ];
-
-    ws.set_row_height(0, 30.0).map_err(|e| e.to_string())?;
-    for (col, h) in headers.iter().enumerate() {
-        let fmt = if col == 0 || col == 21 || col == 24 || col == 26 {
-            &s.col_header_center
-        } else {
-            &s.col_header
-        };
-        ws.write_string_with_format(0, col as u16, *h, fmt)
-            .map_err(|e| e.to_string())?;
-    }
+    sheet.write_headers_with(&headers, |col| {
+        col == 0 || col == 21 || col == 24 || col == 26
+    })?;
 
     // 1. Initialize TransactionReconciler to index products, uploads, and invoices
     let reconciler = TransactionReconciler::from_inputs(app_up, dig_up, invoices, sales)?;
@@ -145,18 +131,22 @@ fn build_final_match_sheet(
 
     for (r_idx, row) in store_occ.iter().enumerate().skip(1) {
         let cur_row = r_idx as u32; // Row 1 is header, data starts at row 1
-        ws.set_row_height(cur_row, 22.0)
+        sheet
+            .ws
+            .set_row_height(cur_row, 22.0)
             .map_err(|e| e.to_string())?;
 
         // Col 0: 序号 (1-based)
-        ws.write_number_with_format(cur_row, 0, r_idx as f64, &s.int_count)
+        sheet
+            .ws
+            .write_number_with_format(cur_row, 0, r_idx as f64, &s.int_count)
             .map_err(|e| e.to_string())?;
 
         // Col 1-20: Pre-resolved from store occurrence
         for (index, column) in resolved_store_cols.iter().enumerate() {
             column
                 .kind
-                .write(ws, s, cur_row, index as u16 + 1, column.cell(row))?;
+                .write(sheet.ws, s, cur_row, index as u16 + 1, column.cell(row))?;
         }
 
         let ref_num = cell_to_string(&row[s_ref_idx]);
@@ -164,23 +154,35 @@ fn build_final_match_sheet(
         let rec = reconciler.reconcile(&ref_num, &remark);
 
         // Col 21, 22, 23: prefer complete, unique sales products; fall back to invoices as a group.
-        ws.write_string_with_format(cur_row, 21, rec.category(), &s.text_center)
+        sheet
+            .ws
+            .write_string_with_format(cur_row, 21, rec.category(), &s.text_center)
             .map_err(|e| e.to_string())?;
-        ws.write_string_with_format(cur_row, 22, rec.brand(), &s.text_left)
+        sheet
+            .ws
+            .write_string_with_format(cur_row, 22, rec.brand(), &s.text_left)
             .map_err(|e| e.to_string())?;
-        ws.write_string_with_format(cur_row, 23, rec.model(), &s.text_left)
+        sheet
+            .ws
+            .write_string_with_format(cur_row, 23, rec.model(), &s.text_left)
             .map_err(|e| e.to_string())?;
 
         // Col 24: 状态
-        ws.write_string_with_format(cur_row, 24, rec.status, &s.text_center)
+        sheet
+            .ws
+            .write_string_with_format(cur_row, 24, rec.status, &s.text_center)
             .map_err(|e| e.to_string())?;
 
         // Col 25: 发票号
-        ws.write_string_with_format(cur_row, 25, rec.invoice_no, &s.text_left)
+        sheet
+            .ws
+            .write_string_with_format(cur_row, 25, rec.invoice_no, &s.text_left)
             .map_err(|e| e.to_string())?;
 
         // Col 26: 发票是否红冲
-        ws.write_string_with_format(cur_row, 26, rec.red_flush_text(), &s.text_center)
+        sheet
+            .ws
+            .write_string_with_format(cur_row, 26, rec.red_flush_text(), &s.text_center)
             .map_err(|e| e.to_string())?;
     }
 
@@ -192,41 +194,32 @@ fn build_store_occurrence_sheet(
     s: &StylePool,
     store_occ: &SheetData,
 ) -> Result<(), String> {
-    let ws = wb.add_worksheet();
-    ws.set_name("1.门店国补发生表（银联系统直接导出，不需要加工）")
-        .map_err(|e| e.to_string())?;
-    ws.set_freeze_panes(1, 0).map_err(|e| e.to_string())?;
+    if store_occ[0].len() < 26 {
+        return Err("银联交易明细门店.xlsx: 表头不足 26 列".to_string());
+    }
+
+    let mut sheet =
+        ReportSheetBuilder::new(wb, "1.门店国补发生表（银联系统直接导出，不需要加工）", s)?;
+    sheet.set_freeze_panes(1, 0)?;
 
     // 26 columns widths
     let widths = [
         20.0, 20.0, 14.0, 12.0, 22.0, 14.0, 14.0, 12.0, 12.0, 12.0, 16.0, 18.0, 12.0, 16.0, 18.0,
         24.0, 16.0, 28.0, 28.0, 14.0, 16.0, 14.0, 14.0, 14.0, 16.0, 18.0,
     ];
-    for (col, w) in widths.iter().enumerate() {
-        ws.set_column_width(col as u16, *w)
-            .map_err(|e| e.to_string())?;
-    }
+    sheet.set_column_widths(&widths)?;
 
-    // Row 1: Header (26 columns straight from source)
-    if store_occ[0].len() < 26 {
-        return Err("银联交易明细门店.xlsx: 表头不足 26 列".to_string());
-    }
-    ws.set_row_height(0, 30.0).map_err(|e| e.to_string())?;
-    for (col, cell) in store_occ[0].iter().take(26).enumerate() {
-        let name = cell_to_string(cell);
-        ws.write_string_with_format(0, col as u16, name, &s.col_header)
-            .map_err(|e| e.to_string())?;
-    }
+    let headers: Vec<String> = store_occ[0].iter().take(26).map(cell_to_string).collect();
+    let header_strs: Vec<&str> = headers.iter().map(|s| s.as_str()).collect();
+    sheet.write_headers(&header_strs)?;
 
-    let columns: Vec<_> = store_occ[0]
+    let columns: Vec<_> = headers
         .iter()
-        .take(26)
         .enumerate()
-        .map(|(col, field)| ReportColumn::new(Some(col), &cell_to_string(field)))
+        .map(|(col, field)| ReportColumn::new(Some(col), field))
         .collect();
-    for (r_idx, row) in store_occ.iter().enumerate().skip(1) {
-        let cur_row = r_idx as u32;
-        write_report_row(ws, s, cur_row, row, &columns)?;
+    for row in store_occ.iter().skip(1) {
+        sheet.write_row(row, &columns)?;
     }
 
     Ok(())
@@ -240,37 +233,28 @@ fn build_store_refund_sheet(
     app_store_code: &str,
     dig_store_code: &str,
 ) -> Result<(), String> {
-    let ws = wb.add_worksheet();
-    ws.set_name("2.门店累计回款表（事业部财务下发，门店筛选自己的）")
-        .map_err(|e| e.to_string())?;
-    ws.set_freeze_panes(1, 0).map_err(|e| e.to_string())?;
+    if app_refund[0].len() < 24 {
+        return Err("回款明细家电电脑.xlsx: 表头不足 24 列".to_string());
+    }
+
+    let mut sheet =
+        ReportSheetBuilder::new(wb, "2.门店累计回款表（事业部财务下发，门店筛选自己的）", s)?;
+    sheet.set_freeze_panes(1, 0)?;
 
     let widths = [
         32.0, 20.0, 16.0, 26.0, 26.0, 22.0, 18.0, 14.0, 14.0, 14.0, 14.0, 12.0, 24.0, 14.0, 16.0,
         12.0, 16.0, 36.0, 14.0, 24.0, 18.0, 24.0, 48.0, 18.0,
     ];
-    for (col, w) in widths.iter().enumerate() {
-        ws.set_column_width(col as u16, *w)
-            .map_err(|e| e.to_string())?;
-    }
+    sheet.set_column_widths(&widths)?;
 
     // Header (24 columns from source)
-    if app_refund[0].len() < 24 {
-        return Err("回款明细家电电脑.xlsx: 表头不足 24 列".to_string());
-    }
-    let fields: Vec<_> = app_refund[0].iter().take(24).map(cell_to_string).collect();
-    ws.set_row_height(0, 30.0).map_err(|e| e.to_string())?;
-    for (col, field) in fields.iter().enumerate() {
-        ws.write_string_with_format(0, col as u16, field, &s.col_header)
-            .map_err(|e| e.to_string())?;
-    }
+    let fields: Vec<String> = app_refund[0].iter().take(24).map(cell_to_string).collect();
+    let field_strs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
+    sheet.write_headers(&field_strs)?;
 
-    let mut cur_row: u32 = 1;
-
-    let append_rows = |ws: &mut Worksheet,
+    let append_rows = |sheet: &mut ReportSheetBuilder<'_>,
                        rows: &SheetData,
-                       store_code: &str,
-                       cur_row: &mut u32|
+                       store_code: &str|
      -> Result<(), String> {
         let h = &rows.header;
         let mch_idx = h.find(&["核销商编"]).ok_or("回款明细缺少核销商编")?;
@@ -278,15 +262,14 @@ fn build_store_refund_sheet(
 
         for row in &rows[1..] {
             if cell_to_string(&row[mch_idx]) == store_code {
-                write_report_row(ws, s, *cur_row, row, &columns)?;
-                *cur_row += 1;
+                sheet.write_row(row, &columns)?;
             }
         }
         Ok(())
     };
 
-    append_rows(ws, app_refund, app_store_code, &mut cur_row)?;
-    append_rows(ws, dig_refund, dig_store_code, &mut cur_row)?;
+    append_rows(&mut sheet, app_refund, app_store_code)?;
+    append_rows(&mut sheet, dig_refund, dig_store_code)?;
 
     Ok(())
 }
@@ -297,10 +280,9 @@ fn build_store_upload_sheet(
     app_up: &SheetData,
     dig_up: &SheetData,
 ) -> Result<(), String> {
-    let ws = wb.add_worksheet();
-    ws.set_name("3.门店上传明细（从门店银联后台每月导出后汇总）")
-        .map_err(|e| e.to_string())?;
-    ws.set_freeze_panes(1, 0).map_err(|e| e.to_string())?;
+    let mut sheet =
+        ReportSheetBuilder::new(wb, "3.门店上传明细（从门店银联后台每月导出后汇总）", s)?;
+    sheet.set_freeze_panes(1, 0)?;
 
     // 60 column headers and widths as defined in Section 5.4.2
     let col_defs: [(&str, f64); 60] = [
@@ -366,22 +348,13 @@ fn build_store_upload_sheet(
         ("开票日期", 14.0),
     ];
 
-    for (col, (_, w)) in col_defs.iter().enumerate() {
-        ws.set_column_width(col as u16, *w)
-            .map_err(|e| e.to_string())?;
-    }
+    let widths: Vec<f64> = col_defs.iter().map(|(_, w)| *w).collect();
+    sheet.set_column_widths(&widths)?;
 
-    // Row 1: Header
-    ws.set_row_height(0, 30.0).map_err(|e| e.to_string())?;
-    for (col, (name, _)) in col_defs.iter().enumerate() {
-        let fmt = if [4, 7, 8, 10, 11, 12, 17, 24, 42, 47, 48, 49, 50, 51, 57, 59].contains(&col) {
-            &s.col_header_center
-        } else {
-            &s.col_header
-        };
-        ws.write_string_with_format(0, col as u16, *name, fmt)
-            .map_err(|e| e.to_string())?;
-    }
+    let header_strs: Vec<&str> = col_defs.iter().map(|(name, _)| *name).collect();
+    sheet.write_headers_with(&header_strs, |col| {
+        [4, 7, 8, 10, 11, 12, 17, 24, 42, 47, 48, 49, 50, 51, 57, 59].contains(&col)
+    })?;
 
     // Pre-resolve column mappings for Appliance and Digital
     let app_h = &app_up.header;
@@ -418,22 +391,12 @@ fn build_store_upload_sheet(
     let app_map = resolve_indices(app_h, false, "已上传家电电脑.xlsx")?;
     let dig_map = resolve_indices(dig_h, true, "已上传数码.xlsx")?;
 
-    let mut cur_row: u32 = 1;
-
-    let write_dataset = |ws: &mut Worksheet,
-                         rows: &[Vec<Data>],
-                         col_map: &[ReportColumn],
-                         cur_row: &mut u32|
-     -> Result<(), String> {
-        for row in &rows[1..] {
-            write_report_row(ws, s, *cur_row, row, col_map)?;
-            *cur_row += 1;
-        }
-        Ok(())
-    };
-
-    write_dataset(ws, app_up, &app_map, &mut cur_row)?;
-    write_dataset(ws, dig_up, &dig_map, &mut cur_row)?;
+    for row in &app_up[1..] {
+        sheet.write_row(row, &app_map)?;
+    }
+    for row in &dig_up[1..] {
+        sheet.write_row(row, &dig_map)?;
+    }
 
     Ok(())
 }
@@ -441,7 +404,7 @@ fn build_store_upload_sheet(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use calamine::{Reader, open_workbook_auto};
+    use calamine::{Data, Reader, open_workbook_auto};
 
     #[test]
     fn finance_preserves_terminal_status_without_mutating_shared_inputs() {

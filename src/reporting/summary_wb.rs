@@ -5,7 +5,7 @@ use rust_xlsxwriter::{
 };
 use std::path::Path;
 
-use super::excel::write_report_row;
+use super::excel::ReportSheetBuilder;
 use super::reader::{
     cell_to_decimal, cell_to_string, get_colored_row_indices, get_colored_row_indices_multi,
 };
@@ -427,48 +427,21 @@ fn build_failed_records_sheet(
     app_failed: &[FailedUploadRecord<'_>],
     dig_failed: &[FailedUploadRecord<'_>],
 ) -> Result<(), String> {
-    let ws = wb.add_worksheet();
-    ws.set_name("审核失败明细").map_err(|e| e.to_string())?;
+    let mut sheet = ReportSheetBuilder::new(wb, "审核失败明细", s)?;
 
     // Column widths: A=14, B=20, C=16, D=48, E=24, F=16, G=16, H=24, I=38, J=20
     let widths = [14.0, 20.0, 16.0, 48.0, 24.0, 16.0, 16.0, 24.0, 38.0, 20.0];
-    for (col, w) in widths.iter().enumerate() {
-        ws.set_column_width(col as u16, *w)
-            .map_err(|e| e.to_string())?;
-    }
+    sheet.set_column_widths(&widths)?;
 
     // Title & Subtitle
-    ws.set_row_height(0, 30.0).map_err(|e| e.to_string())?;
-    ws.merge_range(0, 0, 0, 9, "审核失败明细", &s.title)
-        .map_err(|e| e.to_string())?;
-
-    ws.set_row_height(1, 22.0).map_err(|e| e.to_string())?;
-    ws.merge_range(
-        1,
-        0,
-        1,
+    sheet.write_title_block(
         9,
+        "审核失败明细",
         "数据源：已上传家电电脑.xlsx、已上传数码.xlsx、发票明细.xlsx；家电电脑按商品名称升序；发票金额单位：元",
-        &s.subtitle,
-    )
-    .map_err(|e| e.to_string())?;
-
-    ws.set_row_height(2, 8.0).map_err(|e| e.to_string())?;
+    )?;
 
     // 1. Appliance Section
-    let mut cur_row: u32 = 3;
-    ws.set_row_height(cur_row, 24.0)
-        .map_err(|e| e.to_string())?;
-    ws.merge_range(
-        cur_row,
-        0,
-        cur_row,
-        8,
-        "家电电脑审核失败明细",
-        &s.section_header,
-    )
-    .map_err(|e| e.to_string())?;
-    cur_row += 1;
+    sheet.write_section_header(8, "家电电脑审核失败明细")?;
 
     let app_headers = [
         "交易日期",
@@ -481,13 +454,7 @@ fn build_failed_records_sheet(
         "S/N码",
         "商品名称",
     ];
-    ws.set_row_height(cur_row, 30.0)
-        .map_err(|e| e.to_string())?;
-    for (col, h) in app_headers.iter().enumerate() {
-        ws.write_string_with_format(cur_row, col as u16, *h, &s.col_header)
-            .map_err(|e| e.to_string())?;
-    }
-    cur_row += 1;
+    sheet.write_headers(&app_headers)?;
 
     let failed_fields = [
         "交易日期",
@@ -543,27 +510,22 @@ fn build_failed_records_sheet(
     };
 
     for record in app_failed {
-        write_fail_row(ws, record.row, &app_columns, &record.extra1, None, cur_row)?;
-        cur_row += 1;
+        write_fail_row(
+            sheet.ws,
+            record.row,
+            &app_columns,
+            &record.extra1,
+            None,
+            sheet.cur_row,
+        )?;
+        sheet.cur_row += 1;
     }
 
     // Blank row
-    ws.set_row_height(cur_row, 8.0).map_err(|e| e.to_string())?;
-    cur_row += 1;
+    sheet.write_blank_row(8.0)?;
 
     // 2. Digital Section
-    ws.set_row_height(cur_row, 24.0)
-        .map_err(|e| e.to_string())?;
-    ws.merge_range(
-        cur_row,
-        0,
-        cur_row,
-        9,
-        "数码审核失败明细",
-        &s.section_header,
-    )
-    .map_err(|e| e.to_string())?;
-    cur_row += 1;
+    sheet.write_section_header(9, "数码审核失败明细")?;
 
     let dig_headers = [
         "交易日期",
@@ -577,24 +539,18 @@ fn build_failed_records_sheet(
         "IMEI1",
         "IMEI2",
     ];
-    ws.set_row_height(cur_row, 30.0)
-        .map_err(|e| e.to_string())?;
-    for (col, h) in dig_headers.iter().enumerate() {
-        ws.write_string_with_format(cur_row, col as u16, *h, &s.col_header)
-            .map_err(|e| e.to_string())?;
-    }
-    cur_row += 1;
+    sheet.write_headers(&dig_headers)?;
 
     for record in dig_failed {
         write_fail_row(
-            ws,
+            sheet.ws,
             record.row,
             &dig_columns,
             &record.extra1,
             record.extra2.as_deref(),
-            cur_row,
+            sheet.cur_row,
         )?;
-        cur_row += 1;
+        sheet.cur_row += 1;
     }
 
     Ok(())
@@ -608,108 +564,75 @@ fn build_refund_anomaly_sheet(
     app_refund: &RefundAnomalySection<'_>,
     dig_refund: &RefundAnomalySection<'_>,
 ) -> Result<(), String> {
-    let ws = wb.add_worksheet();
-    ws.set_name("异常回款明细").map_err(|e| e.to_string())?;
+    let mut sheet = ReportSheetBuilder::new(wb, "异常回款明细", s)?;
 
     // 24 column widths
     let widths = [
         32.0, 20.0, 16.0, 26.0, 26.0, 22.0, 18.0, 14.0, 14.0, 14.0, 14.0, 12.0, 24.0, 14.0, 16.0,
         12.0, 16.0, 36.0, 14.0, 24.0, 18.0, 24.0, 48.0, 18.0,
     ];
-    for (col, w) in widths.iter().enumerate() {
-        ws.set_column_width(col as u16, *w)
-            .map_err(|e| e.to_string())?;
-    }
+    sheet.set_column_widths(&widths)?;
 
     // Title & Subtitle
-    ws.set_row_height(0, 30.0).map_err(|e| e.to_string())?;
-    ws.merge_range(0, 0, 0, 23, "异常回款明细", &s.title)
-        .map_err(|e| e.to_string())?;
-
-    ws.set_row_height(1, 22.0).map_err(|e| e.to_string())?;
-    ws.merge_range(
-        1,
-        0,
-        1,
+    sheet.write_title_block(
         23,
+        "异常回款明细",
         "提取规则：筛选本店核销商编且单元格为粉色填充（颜色 #FFC7CE）；重复交易参考号在前，不重复记录在后并标黄；组内升序；金额单位：元",
-        &s.subtitle,
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
 
-    ws.set_row_height(2, 8.0).map_err(|e| e.to_string())?;
-
-    let write_section = |ws: &mut Worksheet,
+    let write_section = |sheet: &mut ReportSheetBuilder<'_>,
                          title: &str,
                          rows: &SheetData,
-                         section: &RefundAnomalySection<'_>,
-                         start_row: &mut u32|
+                         section: &RefundAnomalySection<'_>|
      -> Result<(), String> {
-        ws.set_row_height(*start_row, 24.0)
-            .map_err(|e| e.to_string())?;
-        ws.merge_range(*start_row, 0, *start_row, 23, title, &s.section_header)
-            .map_err(|e| e.to_string())?;
-        *start_row += 1;
+        sheet.write_section_header(23, title)?;
 
         // Write header row (24 columns from source)
-        ws.set_row_height(*start_row, 34.0)
-            .map_err(|e| e.to_string())?;
-        let fields: Vec<_> = (0..24)
+        let fields: Vec<String> = (0..24)
             .map(|col| rows[0].get(col).map(cell_to_string).unwrap_or_default())
             .collect();
-        let columns: Vec<_> = fields
+        let field_strs: Vec<&str> = fields.iter().map(|f| f.as_str()).collect();
+        let columns: Vec<ReportColumn> = fields
             .iter()
             .enumerate()
             .map(|(col, field)| ReportColumn::new(Some(col), field))
             .collect();
-        for (col, col_name) in fields.iter().enumerate() {
-            ws.write_string_with_format(*start_row, col as u16, col_name, &s.col_header)
-                .map_err(|e| e.to_string())?;
-        }
-        *start_row += 1;
+        sheet.write_headers(&field_strs)?;
 
-        let data_start_row = *start_row;
+        let data_start_row = sheet.cur_row;
         for row in &section.rows {
-            write_report_row(ws, s, *start_row, row, &columns)?;
-            *start_row += 1;
+            sheet.write_row(row, &columns)?;
         }
 
-        if data_start_row < *start_row {
+        if data_start_row < sheet.cur_row {
             let reference_col = column_number_to_name(section.ref_col_idx as u16);
             let first_row = data_start_row + 1;
-            let last_row = *start_row;
+            let last_row = sheet.cur_row;
             let rule = format!(
                 "=AND(${reference_col}{first_row}<>\"\",COUNTIF(${reference_col}${first_row}:${reference_col}${last_row},${reference_col}{first_row})=1)"
             );
             let highlight = ConditionalFormatFormula::new()
                 .set_rule(rule.as_str())
                 .set_format(Format::new().set_background_color(Color::RGB(0xFFF2CC)));
-            ws.add_conditional_format(data_start_row, 0, *start_row - 1, 23, &highlight)
+            sheet
+                .ws
+                .add_conditional_format(data_start_row, 0, sheet.cur_row - 1, 23, &highlight)
                 .map_err(|e| e.to_string())?;
         }
         Ok(())
     };
 
-    let mut cur_row = 3;
     write_section(
-        ws,
+        &mut sheet,
         "家电电脑异常回款明细",
         app_refund_rows,
         app_refund,
-        &mut cur_row,
     )?;
 
     // Blank row
-    ws.set_row_height(cur_row, 8.0).map_err(|e| e.to_string())?;
-    cur_row += 1;
+    sheet.write_blank_row(8.0)?;
 
-    write_section(
-        ws,
-        "数码异常回款明细",
-        dig_refund_rows,
-        dig_refund,
-        &mut cur_row,
-    )?;
+    write_section(&mut sheet, "数码异常回款明细", dig_refund_rows, dig_refund)?;
 
     Ok(())
 }
@@ -720,59 +643,38 @@ fn build_invoice_anomaly_sheet(
     invoices: &SheetData,
     section: &InvoiceAnomalySection<'_>,
 ) -> Result<(), String> {
-    let ws = wb.add_worksheet();
-    ws.set_name("异常发票明细").map_err(|e| e.to_string())?;
-
-    // 8 columns: widths [20.0, 14.0, 24.0, 18.0, 40.0, 58.0, 16.0, 22.0]
-    let widths = [20.0, 14.0, 24.0, 18.0, 40.0, 58.0, 16.0, 22.0];
-    for (col, w) in widths.iter().enumerate() {
-        ws.set_column_width(col as u16, *w)
-            .map_err(|e| e.to_string())?;
-    }
-
-    // Title & Subtitle
-    ws.set_row_height(0, 30.0).map_err(|e| e.to_string())?;
-    ws.merge_range(0, 0, 0, 7, "异常发票明细", &s.title)
-        .map_err(|e| e.to_string())?;
-
-    ws.set_row_height(1, 22.0).map_err(|e| e.to_string())?;
-    ws.merge_range(
-        1,
-        0,
-        1,
-        7,
-        "提取规则：发票明细黄色填充区域（颜色 #FFEB9C）；按匹配单据号升序排列",
-        &s.subtitle,
-    )
-    .map_err(|e| e.to_string())?;
-
-    ws.set_row_height(2, 8.0).map_err(|e| e.to_string())?;
-
-    // Section Header
-    ws.set_row_height(3, 24.0).map_err(|e| e.to_string())?;
-    ws.merge_range(3, 0, 3, 7, "黄色异常发票明细", &s.section_header)
-        .map_err(|e| e.to_string())?;
-
-    // Column Headers
     if invoices[0].len() < 8 {
         return Err("发票明细.xlsx: 表头不足 8 列".to_string());
     }
-    ws.set_row_height(4, 30.0).map_err(|e| e.to_string())?;
-    for (col, cell) in invoices[0].iter().take(8).enumerate() {
-        let h_name = cell_to_string(cell);
-        ws.write_string_with_format(4, col as u16, h_name, &s.col_header)
-            .map_err(|e| e.to_string())?;
-    }
 
-    let columns: Vec<_> = invoices[0]
+    let mut sheet = ReportSheetBuilder::new(wb, "异常发票明细", s)?;
+
+    // 8 columns: widths [20.0, 14.0, 24.0, 18.0, 40.0, 58.0, 16.0, 22.0]
+    let widths = [20.0, 14.0, 24.0, 18.0, 40.0, 58.0, 16.0, 22.0];
+    sheet.set_column_widths(&widths)?;
+
+    // Title & Subtitle
+    sheet.write_title_block(
+        7,
+        "异常发票明细",
+        "提取规则：发票明细黄色填充区域（颜色 #FFEB9C）；按匹配单据号升序排列",
+    )?;
+
+    // Section Header
+    sheet.write_section_header(7, "黄色异常发票明细")?;
+
+    let header_strings: Vec<String> = invoices[0].iter().take(8).map(cell_to_string).collect();
+    let header_strs: Vec<&str> = header_strings.iter().map(|s| s.as_str()).collect();
+    sheet.write_headers(&header_strs)?;
+
+    let columns: Vec<_> = header_strings
         .iter()
-        .take(8)
         .enumerate()
-        .map(|(col, field)| ReportColumn::new(Some(col), &cell_to_string(field)))
+        .map(|(col, field)| ReportColumn::new(Some(col), field))
         .collect();
 
-    for (cur_row, row) in (5_u32..).zip(&section.rows) {
-        write_report_row(ws, s, cur_row, row, &columns)?;
+    for row in &section.rows {
+        sheet.write_row(row, &columns)?;
     }
 
     Ok(())
