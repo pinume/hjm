@@ -1,11 +1,13 @@
-//! 浮点往返精度验证（仅测试）。
+//! 浮点往返精度回归测试（仅测试）。
 //!
 //! 生产链路：清洗层 `Value::Decimal` → `write_table()`（`Decimal::to_f64`，XLSX 数值单元格）
-//! → Calamine 读取为 `Data::Float` → `cell_to_decimal()`（`Decimal::from_f64_retain`）
+//! → Calamine 读取为 `Data::Float` → `cell_to_decimal()`（`Decimal::from_f64`）
 //! → 报表累计。本模块使用真实的 `write_table()` 写出与 Calamine 读回，不手工构造
-//! `Data::Float`。测试不依赖任何真实业务数据，也不修改生产逻辑。
+//! `Data::Float`。测试不依赖任何真实业务数据。
 //!
-//! 断言表达“理论上应成立的业务结果”；失败即复现证据，诊断信息用 `--nocapture` 查看。
+//! 背景：`cell_to_decimal()` 曾使用 `Decimal::from_f64_retain`，保留二进制浮点尾差，
+//! 使理论为零的累计值通不过 `is_zero()`，进而破坏零分母比例与零值显示。现已改用
+//! `Decimal::from_f64`，这些测试防止回退；诊断信息用 `--nocapture` 查看。
 
 use super::reader::{cell_to_decimal, read_sheet_rows};
 use super::summary_data::{CategoryBrandSummary, div_pct};

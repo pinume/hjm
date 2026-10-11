@@ -168,6 +168,10 @@ pub fn cell_to_string(cell: &Data) -> String {
 }
 
 /// Convert calamine cell data to Decimal for high precision money calculation
+///
+/// 浮点单元格使用`Decimal::from_f64`（与清洗层一致），不用`from_f64_retain`：后者保留
+/// 二进制尾差，会使理论为零的累计值通不过`is_zero()`。`from_f64`按约15位有效数字规整，
+/// 超过该精度的数值会被舍弃。
 pub fn cell_to_decimal(cell: &Data) -> Option<Decimal> {
     match cell {
         Data::Empty => None,
