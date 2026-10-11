@@ -316,8 +316,11 @@ impl<'a> SalesCouponReconciler<'a> {
             .into_unique(&mut self.stats.ambiguous[2]);
         let fill = receipts_hit.is_some().then_some(Fill::Pink);
 
-        let finance_category = normalize_finance_category(record.finance_category);
-        let (uploaded_by_ref, uploaded_by_inv) = if finance_category == "数码" {
+        let identity = crate::utils::product::ProductIdentity::from_sales(
+            &record.brand,
+            &record.finance_category,
+        );
+        let (uploaded_by_ref, uploaded_by_inv) = if identity.category == "数码" {
             (self.digital_ref, self.digital_inv)
         } else {
             (self.appliance_ref, self.appliance_inv)
@@ -349,8 +352,8 @@ impl<'a> SalesCouponReconciler<'a> {
             text_value(record.doc_no),
             record.doc_date,
             text_value(record.product_name),
-            text_value(normalize_brand(record.brand)),
-            text_value(finance_category),
+            text_value(identity.brand),
+            text_value(identity.category),
             Value::Decimal(record.subsidy),
             Value::Integer(quantity),
             reference.map_or(Value::Empty, Value::Text),
@@ -415,24 +418,15 @@ fn to_row(
 }
 
 /// 10.11 节品牌归并：仅替换列出的原值，其余原样保留。
+#[cfg(test)]
 pub(crate) fn normalize_brand(value: String) -> String {
-    match value.as_str() {
-        "COLMO厨热JX" | "美的厨热JX" | "东芝JX" | "华凌" | "小天鹅" | "COLMO" => {
-            "美的".to_string()
-        }
-        "卡萨帝" | "统帅" => "海尔".to_string(),
-        "晶弘" => "格力".to_string(),
-        _ => value,
-    }
+    crate::utils::product::normalize_sales_brand(&value)
 }
 
 /// 10.11 节财务大类归并：仅替换列出的原值，其余原样保留。
+#[cfg(test)]
 fn normalize_finance_category(value: String) -> String {
-    match value.as_str() {
-        "国产彩电" | "进口彩电" => "彩电".to_string(),
-        "新业务类" => "数码".to_string(),
-        _ => value,
-    }
+    crate::utils::product::normalize_finance_category(&value)
 }
 
 fn output_columns() -> Vec<Column> {

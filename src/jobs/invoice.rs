@@ -218,16 +218,7 @@ fn unseparated_finance_category(name: &str) -> Option<&'static str> {
 }
 
 fn normalize_invoice_brand(brand: &str) -> String {
-    match brand.to_ascii_lowercase().as_str() {
-        "vivo" => "vivo".to_string(),
-        "iqoo" => "iqoo".to_string(),
-        "huawei" => "华为".to_string(),
-        "oppo" => "OPPO".to_string(),
-        "美的（小电）" | "美的（微清）" | "colmo厨热jx水系统" => {
-            "美的".to_string()
-        }
-        _ => super::coupons::normalize_brand(brand.to_string()),
-    }
+    crate::utils::product::normalize_invoice_brand(brand)
 }
 
 fn brand_from_unseparated_name(name: &str) -> String {
