@@ -61,9 +61,8 @@ struct InvoiceEntry {
 
 #[derive(Debug, Default)]
 pub(crate) struct TransactionReconciler {
-    // None marks a conflicting reference and remains ambiguous for later candidates.
-    sales_map: HashMap<String, Option<ProductEntry>>,
-    sales_documents: HashMap<String, Option<String>>,
+    sales_map: UniqueIndex<ProductEntry>,
+    sales_documents: UniqueIndex<String>,
     blue_invoices: HashMap<String, String>,
     upload_map: UniqueIndex<UploadEntry>,
     invoice_map: UniqueIndex<InvoiceEntry>,
@@ -149,8 +148,8 @@ impl TransactionReconciler {
         let sales_doc_idx = sales
             .header
             .require("匹配单据号", "销售用券情况统计.xlsx")?;
-        let mut sales_map = HashMap::new();
-        let mut sales_documents = HashMap::new();
+        let mut sales_map = UniqueIndex::default();
+        let mut sales_documents = UniqueIndex::default();
         for row in &sales[1..] {
             let reference_no = row[sales_reference_idx].to_string();
             if reference_no.is_empty() {
@@ -161,28 +160,14 @@ impl TransactionReconciler {
                 .map(ToString::to_string)
                 .unwrap_or_default();
             if !document.is_empty() {
-                sales_documents
-                    .entry(reference_no.clone())
-                    .and_modify(|candidate: &mut Option<String>| {
-                        if candidate.as_ref() != Some(&document) {
-                            *candidate = None;
-                        }
-                    })
-                    .or_insert(Some(document));
+                sales_documents.insert(reference_no.clone(), document);
             }
             let product = ProductEntry {
                 category: row[sales_category_idx].to_string(),
                 brand: row[sales_brand_idx].to_string(),
                 model: row[sales_name_idx].to_string(),
             };
-            sales_map
-                .entry(reference_no)
-                .and_modify(|candidate: &mut Option<ProductEntry>| {
-                    if candidate.as_ref() != Some(&product) {
-                        *candidate = None;
-                    }
-                })
-                .or_insert(Some(product));
+            sales_map.insert(reference_no, product);
         }
 
         // Completed blue invoices take priority; ambiguity never falls back to an arbitrary blue.
@@ -228,7 +213,6 @@ impl TransactionReconciler {
             _ => self
                 .sales_documents
                 .get(reference_no)
-                .and_then(Option::as_ref)
                 .and_then(|document| self.blue_invoices.get(document))
                 .map(String::as_str)
                 .unwrap_or(""),
@@ -238,7 +222,6 @@ impl TransactionReconciler {
         let product = self
             .sales_map
             .get(reference_no)
-            .and_then(Option::as_ref)
             .filter(|entry| {
                 !entry.category.is_empty() && !entry.brand.is_empty() && !entry.model.is_empty()
             })

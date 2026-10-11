@@ -17,8 +17,9 @@ use super::data::{CommonInputs, ReportColumn, SheetData};
 use super::reader::read_sheet_rows;
 use super::summary_data::{
     AnomalyColors, CategoryBrandSummary, MetricRow, SUMMARY_STATUSES, SummaryMetrics,
-    SummaryRecords, build_invoice_name_map,
+    SummaryRecords, build_invoice_name_index,
 };
+use super::unique_index::UniqueIndex;
 
 /// Generate Workbook 1: 国补上传情况汇总.xlsx (5 Sheets)
 pub fn generate_summary_workbook(input_dir: &Path, output_path: &Path) -> Result<(), String> {
@@ -55,7 +56,7 @@ pub(crate) fn generate_with_inputs(
     // Precalculate shared metrics and lookup structures once
     let metrics = SummaryMetrics::calculate(sales_rows, app_upload_rows, dig_upload_rows)?;
     let category_brands = CategoryBrandSummary::from_sales(sales_rows)?;
-    let (invoice_name_map, invoice_name_warning) = build_invoice_name_map(invoice_rows)?;
+    let invoice_name_index = build_invoice_name_index(invoice_rows)?;
 
     let colors = AnomalyColors {
         app_pink: app_pink_rows,
@@ -81,7 +82,7 @@ pub(crate) fn generate_with_inputs(
         headers,
         &colors,
         [app_store_code, dig_store_code],
-        &invoice_name_map,
+        &invoice_name_index,
     )?;
 
     // Build Sheet 1: 汇总
@@ -96,7 +97,7 @@ pub(crate) fn generate_with_inputs(
         &styles,
         app_upload_rows,
         dig_upload_rows,
-        &invoice_name_map,
+        &invoice_name_index,
         &records.app_failed,
         &records.dig_failed,
     )?;
@@ -119,7 +120,7 @@ pub(crate) fn generate_with_inputs(
         .map_err(|e| format!("保存工作簿一失败: {}", e))?;
 
     let mut warnings = Vec::new();
-    if let Some(warning) = invoice_name_warning {
+    if let Some(warning) = invoice_name_index.warning("发票商品名称索引") {
         warnings.push(warning);
     }
     Ok(warnings)
@@ -431,7 +432,7 @@ fn build_failed_records_sheet(
     s: &StylePool,
     app_up: &SheetData,
     dig_up: &SheetData,
-    invoice_name_map: &HashMap<String, String>,
+    invoice_names: &UniqueIndex<String>,
     app_failed: &[usize],
     dig_failed: &[usize],
 ) -> Result<(), String> {
@@ -555,7 +556,7 @@ fn build_failed_records_sheet(
     for &index in app_failed {
         let row = &app_up[index];
         let inv_no = cell_to_string(&row[inv_idx]);
-        let prod_name = invoice_name_map.get(&inv_no).cloned().unwrap_or_default();
+        let prod_name = invoice_names.get(&inv_no).cloned().unwrap_or_default();
         write_fail_row(ws, row, &app_columns, &prod_name, None, cur_row)?;
         cur_row += 1;
     }
@@ -1085,16 +1086,17 @@ mod status_tests {
         assert_eq!(metrics.unup.app_amt, Decimal::new(8500, 2));
         assert_eq!(metrics.unup.app_cnt, 3);
         let mut failures = Workbook::new();
+        let empty_names = UniqueIndex::default();
         build_failed_records_sheet(
             &mut failures,
             &StylePool::default(),
             &uploads,
             &uploads,
-            &HashMap::new(),
+            &empty_names,
             &super::super::summary_data::failed_indices(
                 &uploads,
                 &uploads.header,
-                Some(&HashMap::new()),
+                Some(&empty_names),
             )
             .unwrap(),
             &super::super::summary_data::failed_indices(&uploads, &uploads.header, None).unwrap(),

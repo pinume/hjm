@@ -283,3 +283,211 @@ fn cli_cleans_all_eight_categories_and_publishes_two_excel_reports() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn cli_warns_on_duplicate_business_key_conflicts_and_exits_successfully() {
+    let root = std::env::temp_dir().join(format!(
+        "subsidy-conflict-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let input = root.join("raw");
+    std::fs::create_dir_all(&input).unwrap();
+    // Two conflicting invoice records with the same number but differing product names
+    export(
+        &input,
+        "发票_20260914.xlsx",
+        headers::INVOICE,
+        5,
+        "发票",
+        &[
+            &[
+                ("开票时间", "2026-09-14 10:00:00"),
+                ("开票类型", "蓝票"),
+                ("数电发票号码", "123"),
+                ("主要商品名称", "海尔洗衣机"),
+                ("备注信息", "销售日期2026-09-14 单据号ZFFX000001"),
+                ("开票状态", "开票完成"),
+            ],
+            &[
+                ("开票时间", "2026-09-14 10:05:00"),
+                ("开票类型", "蓝票"),
+                ("数电发票号码", "123"),
+                ("主要商品名称", "美的空调"),
+                ("备注信息", "销售日期2026-09-14 单据号ZFFX000001"),
+                ("开票状态", "开票完成"),
+            ],
+        ],
+        None,
+    );
+    export(
+        &input,
+        "收款单统计.xlsx",
+        headers::RECEIPTS,
+        1,
+        "标题",
+        &[&[
+            ("日期", "2026-09-14"),
+            ("单据号", "收款ZFFX000002"),
+            ("销售类别", "退货"),
+        ]],
+        Some("合计"),
+    );
+    export(
+        &input,
+        "销售用券情况统计.xlsx",
+        headers::COUPONS,
+        1,
+        "销售用券情况统计",
+        &[
+            &[
+                ("单据号", "收款ZFFX000001"),
+                ("单据日期", "2026-09-14"),
+                ("商品名称", "海尔洗衣机"),
+                ("品牌", "海尔"),
+                ("财务大类", "洗衣机"),
+                ("明细摘要", "16867252734N"),
+                ("合计", "150.00"),
+            ],
+            &[
+                ("单据号", "收款ZFFX000002"),
+                ("单据日期", "2026-09-14"),
+                ("商品名称", "手机"),
+                ("品牌", "华为"),
+                ("财务大类", "新业务类"),
+                ("合计", "-15.00"),
+            ],
+        ],
+        Some("合计"),
+    );
+    export(
+        &input,
+        "89813015722APT1_MX_20260914101809_1.xlsx",
+        headers::UNIONPAY,
+        1,
+        "汇总",
+        &[&[
+            ("清算时间", "20260914"),
+            ("交易时间", "2026-09-14 10:18:09"),
+            ("交易类型", "消费"),
+            ("交易金额", "1000.00"),
+            ("检索号", "16867252734N"),
+            ("商户号", "89813015722APT1"),
+            ("商户订单号", "order-a"),
+        ]],
+        Some("请注意：D1手续费字段为预估数据仅供参考，实际以17：40分之后的D1划付数据为准。"),
+    );
+    for (name, merchant, order, subsidy) in [
+        (
+            "2026年以旧换新补贴明细.xlsx",
+            "89813015722APT1",
+            "order-a",
+            "150.00",
+        ),
+        (
+            "2026年数码补贴明细.xlsx",
+            "89813014812B06R",
+            "other",
+            "10.00",
+        ),
+    ] {
+        export(
+            &input,
+            name,
+            headers::REFUND,
+            0,
+            "",
+            &[&[
+                ("拨付批次", "批次1"),
+                ("核销商编", merchant),
+                ("商户订单号", order),
+                ("补贴金额", subsidy),
+                ("交易完成时间", "2026-09-14 10:00:00"),
+            ]],
+            None,
+        );
+    }
+    for (merchant, tail, uuid, order, reference, status, invoice) in [
+        (
+            "89813015722APT1",
+            headers::APPLIANCE,
+            "a",
+            "order-a",
+            "16867252734N",
+            "待审核",
+            "123",
+        ),
+        (
+            "89813014812B06R",
+            headers::DIGITAL,
+            "d",
+            "order-d",
+            "digital-ref",
+            "审核终止",
+            "",
+        ),
+    ] {
+        export(
+            &input,
+            &format!("MER_{merchant}_20260914101809_yjhx.xlsx"),
+            &format!("{}|{tail}", headers::UPLOADED),
+            1,
+            "标题",
+            &[&[
+                ("实时清分UUID", uuid),
+                ("商户号", merchant),
+                ("订单号", order),
+                ("检索参考号", reference),
+                ("状态", status),
+                ("发票号码", invoice),
+                ("交易金额", "1000.00"),
+                ("交易日期", "20260914"),
+            ]],
+            None,
+        );
+    }
+
+    let mut cli = Command::new(env!("CARGO_BIN_EXE_subsidy"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(cli.stdin.take().unwrap(), "{}", input.display()).unwrap();
+    let result = cli.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+
+    // Exit code must remain 0 (success) even when warnings are generated
+    assert!(
+        result.status.success(),
+        "CLI failed with exit code {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        result.status.code()
+    );
+
+    // Assert warnings are surfaced to CLI output with proper format
+    assert!(
+        stdout.contains("[国补上传情况汇总] 注意：发票商品名称索引：1 个键对应多条内容不同的记录，已按未命中处理（123）"),
+        "Missing summary warning in stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("[26年国补门店财务统筹表] 注意：发票明细索引：1 个键对应多条内容不同的记录，已按未命中处理（123）"),
+        "Missing finance warning in stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("[国补上传情况汇总] 报表成功。"),
+        "Summary report should report success: {stdout}"
+    );
+    assert!(
+        stdout.contains("[26年国补门店财务统筹表] 报表成功。"),
+        "Finance report should report success: {stdout}"
+    );
+
+    let reports = root.join("国补报表");
+    assert_eq!(std::fs::read_dir(&reports).unwrap().count(), 2);
+
+    std::fs::remove_dir_all(root).unwrap();
+}

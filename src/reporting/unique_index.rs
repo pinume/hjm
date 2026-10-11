@@ -58,16 +58,6 @@ impl<V: PartialEq> UniqueIndex<V> {
             "{label}：{count} 个键对应多条内容不同的记录，已按未命中处理（{samples}）"
         ))
     }
-
-    pub(crate) fn to_valid_map(&self) -> HashMap<String, V>
-    where
-        V: Clone,
-    {
-        self.entries
-            .iter()
-            .filter_map(|(k, v)| v.as_ref().map(|val| (k.clone(), val.clone())))
-            .collect()
-    }
 }
 
 #[cfg(test)]
@@ -153,17 +143,5 @@ mod tests {
                 "上传索引：7 个键对应多条内容不同的记录，已按未命中处理（前5个：K1、K2、K3、K4、K5）"
             )
         );
-    }
-
-    #[test]
-    fn to_valid_map_filters_out_conflicts() {
-        let mut index = UniqueIndex::default();
-        index.insert("VALID".to_string(), "val");
-        index.insert("CONFLICT".to_string(), "a");
-        index.insert("CONFLICT".to_string(), "b");
-
-        let map = index.to_valid_map();
-        assert_eq!(map.get("VALID"), Some(&"val"));
-        assert_eq!(map.get("CONFLICT"), None);
     }
 }

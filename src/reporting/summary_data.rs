@@ -298,9 +298,9 @@ impl CategoryBrandSummary {
     }
 }
 
-pub fn build_invoice_name_map(
+pub(crate) fn build_invoice_name_index(
     invoices: &SheetData,
-) -> Result<(HashMap<String, String>, Option<String>), String> {
+) -> Result<UniqueIndex<String>, String> {
     let inv_h = &invoices.header;
     let inv_no_idx = inv_h
         .find(&["数电发票号码"])
@@ -316,8 +316,7 @@ pub fn build_invoice_name_map(
             index.insert(no, name);
         }
     }
-    let warning = index.warning("发票商品名称索引");
-    Ok((index.to_valid_map(), warning))
+    Ok(index)
 }
 
 pub(crate) struct AnomalyColors {
@@ -342,7 +341,7 @@ impl SummaryRecords {
         headers: [&HeaderMap; 5],
         colors: &AnomalyColors,
         stores: [&str; 2],
-        invoice_names: &HashMap<String, String>,
+        invoice_names: &UniqueIndex<String>,
     ) -> Result<Self, String> {
         let [app, dig, invoices, app_refund, dig_refund] = sources;
         let [app_h, dig_h, _, app_refund_h, dig_refund_h] = headers;
@@ -368,7 +367,7 @@ impl SummaryRecords {
 pub(crate) fn failed_indices(
     rows: &[Vec<Data>],
     header: &HeaderMap,
-    invoice_names: Option<&HashMap<String, String>>,
+    invoice_names: Option<&UniqueIndex<String>>,
 ) -> Result<Vec<usize>, String> {
     let status = header.require("状态", "已上传明细")?;
     let mut indices: Vec<_> = rows
@@ -536,7 +535,9 @@ mod tests {
             invoice_yellow: HashSet::from([2, 4, 5]),
             invoice_pink: HashSet::from([4]),
         };
-        let names = HashMap::from([("I1".into(), "B".into()), ("I3".into(), "A".into())]);
+        let mut names = UniqueIndex::default();
+        names.insert("I1".into(), "B".into());
+        names.insert("I3".into(), "A".into());
         let records =
             SummaryRecords::new([&rows; 5], [&header; 5], &colors, ["C", "D"], &names).unwrap();
         assert_eq!(
@@ -552,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn build_invoice_name_map_filters_out_conflicting_names_and_warns() {
+    fn build_invoice_name_index_filters_out_conflicting_names_and_warns() {
         use calamine::Data;
         let rows = vec![
             vec![
@@ -565,11 +566,11 @@ mod tests {
             vec![Data::String("INV2".into()), Data::String("商品C".into())],
         ];
         let invoices = SheetData::new(rows);
-        let (names, warning) = build_invoice_name_map(&invoices).unwrap();
-        assert_eq!(names.get("INV1"), None);
-        assert_eq!(names.get("INV2"), Some(&"商品C".to_string()));
+        let index = build_invoice_name_index(&invoices).unwrap();
+        assert_eq!(index.get("INV1"), None);
+        assert_eq!(index.get("INV2"), Some(&"商品C".to_string()));
         assert_eq!(
-            warning.as_deref(),
+            index.warning("发票商品名称索引").as_deref(),
             Some("发票商品名称索引：1 个键对应多条内容不同的记录，已按未命中处理（INV1）")
         );
     }

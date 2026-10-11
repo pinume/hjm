@@ -208,4 +208,24 @@ mod tests {
             std::fs::remove_dir_all(output).unwrap();
         }
     }
+
+    #[test]
+    fn report_generation_surfaces_warnings_and_publishes_successfully() {
+        let output = unique_temp_path("report-warning-propagation");
+        std::fs::create_dir(&output).unwrap();
+        let expected_warnings = vec![
+            "发票商品名称索引：1 个键对应多条内容不同的记录，已按未命中处理（INV001）".to_string(),
+        ];
+        let warnings = generate_and_publish("test-summary", &output, &output, |_, path| {
+            std::fs::write(path, b"new report").map_err(|error| error.to_string())?;
+            Ok(expected_warnings.clone())
+        })
+        .unwrap();
+        assert_eq!(warnings, expected_warnings);
+        assert_eq!(
+            std::fs::read(output.join("test-summary.xlsx")).unwrap(),
+            b"new report"
+        );
+        std::fs::remove_dir_all(output).unwrap();
+    }
 }
