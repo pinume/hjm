@@ -2,6 +2,7 @@ use calamine::{Data, DataType, Reader, open_workbook_auto};
 use quick_xml::Reader as XmlReader;
 use quick_xml::events::Event;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::FromPrimitive;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::BufReader;
@@ -171,7 +172,7 @@ pub fn cell_to_decimal(cell: &Data) -> Option<Decimal> {
     match cell {
         Data::Empty => None,
         Data::Int(i) => Some(Decimal::from(*i)),
-        Data::Float(f) => Decimal::from_f64_retain(*f),
+        Data::Float(f) => Decimal::from_f64(*f),
         Data::String(s) => {
             let s_clean = s.trim().replace(',', "");
             Decimal::from_str_exact(&s_clean).ok()
