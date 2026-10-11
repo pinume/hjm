@@ -1,5 +1,5 @@
 use super::data::SheetData;
-use super::reader::{HeaderMap, UploadColumns, cell_to_decimal, cell_to_string};
+use super::reader::{UploadColumns, cell_to_decimal, cell_to_string};
 use super::unique_index::UniqueIndex;
 use calamine::Data;
 use rust_decimal::Decimal;
@@ -326,89 +326,203 @@ pub(crate) struct AnomalyColors {
     pub invoice_pink: HashSet<u32>,
 }
 
-pub(crate) struct SummaryRecords {
-    pub app_failed: Vec<usize>,
-    pub dig_failed: Vec<usize>,
-    pub app_refund: Vec<usize>,
-    pub dig_refund: Vec<usize>,
-    pub invoices: Vec<usize>,
+/// 审核失败明细行模型（包含已关联商品名称或数码 IMEI）
+#[derive(Debug, PartialEq, Clone)]
+pub(crate) struct FailedUploadRecord<'a> {
+    pub row: &'a [Data],
+    pub extra1: String,
+    pub extra2: Option<String>,
 }
 
-impl SummaryRecords {
-    // Keep source row indices for workbook presentation ordering.
-    pub fn new(
-        sources: [&[Vec<Data>]; 5],
-        headers: [&HeaderMap; 5],
+/// 异常回款明细节模型（封装参考号多重度分组与排序）
+#[derive(Debug, PartialEq, Clone)]
+pub(crate) struct RefundAnomalySection<'a> {
+    pub rows: Vec<&'a [Data]>,
+    pub ref_col_idx: usize,
+}
+
+/// 异常发票明细节模型（封装按匹配单据号排序）
+#[derive(Debug, PartialEq, Clone)]
+pub(crate) struct InvoiceAnomalySection<'a> {
+    pub rows: Vec<&'a [Data]>,
+}
+
+/// 汇总报表 Sheets 3–5 异常数据的深度领域模型
+#[derive(Debug, PartialEq, Clone)]
+pub(crate) struct AnomalyDatasets<'a> {
+    pub app_failed: Vec<FailedUploadRecord<'a>>,
+    pub dig_failed: Vec<FailedUploadRecord<'a>>,
+    pub app_refund: RefundAnomalySection<'a>,
+    pub dig_refund: RefundAnomalySection<'a>,
+    pub invoices: InvoiceAnomalySection<'a>,
+}
+
+impl<'a> AnomalyDatasets<'a> {
+    pub fn extract(
+        sources: [&'a SheetData; 5],
         colors: &AnomalyColors,
         stores: [&str; 2],
         invoice_names: &UniqueIndex<String>,
     ) -> Result<Self, String> {
-        let [app, dig, invoices, app_refund, dig_refund] = sources;
-        let [app_h, dig_h, _, app_refund_h, dig_refund_h] = headers;
+        let [app_up, dig_up, invoices, app_refund, dig_refund] = sources;
+        let [app_store, dig_store] = stores;
+
+        let app_failed = FailedUploadRecord::extract_appliance(app_up, invoice_names)?;
+        let dig_failed = FailedUploadRecord::extract_digital(dig_up)?;
+        let app_refund_sec = RefundAnomalySection::extract(
+            app_refund,
+            &colors.app_pink,
+            app_store,
+            "回款明细家电电脑.xlsx",
+        )?;
+        let dig_refund_sec = RefundAnomalySection::extract(
+            dig_refund,
+            &colors.dig_pink,
+            dig_store,
+            "回款明细数码.xlsx",
+        )?;
+        let invoices_sec = InvoiceAnomalySection::extract(invoices, colors)?;
+
         Ok(Self {
-            app_failed: failed_indices(app, app_h, Some(invoice_names))?,
-            dig_failed: failed_indices(dig, dig_h, None)?,
-            app_refund: refund_indices(app_refund, app_refund_h, &colors.app_pink, stores[0])?,
-            dig_refund: refund_indices(dig_refund, dig_refund_h, &colors.dig_pink, stores[1])?,
-            invoices: invoices
-                .iter()
-                .enumerate()
-                .skip(1)
-                .filter(|(index, _)| {
-                    colors.invoice_yellow.contains(&(*index as u32 + 1))
-                        && !colors.invoice_pink.contains(&(*index as u32 + 1))
-                })
-                .map(|(index, _)| index)
-                .collect(),
+            app_failed,
+            dig_failed,
+            app_refund: app_refund_sec,
+            dig_refund: dig_refund_sec,
+            invoices: invoices_sec,
         })
     }
 }
 
-pub(crate) fn failed_indices(
-    rows: &[Vec<Data>],
-    header: &HeaderMap,
-    invoice_names: Option<&UniqueIndex<String>>,
-) -> Result<Vec<usize>, String> {
-    let status = header.require("状态", "已上传明细")?;
-    let mut indices: Vec<_> = rows
-        .iter()
-        .enumerate()
-        .skip(1)
-        .filter(|(_, row)| cell_to_string(&row[status]) == "审核失败")
-        .map(|(index, _)| index)
-        .collect();
-    if let Some(names) = invoice_names {
-        let invoice = header.require("发票号码", "已上传家电电脑.xlsx")?;
-        indices.sort_by_key(|&index| {
-            let name = names
-                .get(&cell_to_string(&rows[index][invoice]))
-                .cloned()
-                .unwrap_or_default();
-            (name.is_empty(), name)
+impl<'a> FailedUploadRecord<'a> {
+    pub(crate) fn extract_appliance(
+        app_up: &'a SheetData,
+        invoice_names: &UniqueIndex<String>,
+    ) -> Result<Vec<Self>, String> {
+        let status_idx = app_up.header.require("状态", "已上传明细")?;
+        let inv_idx = app_up.header.require("发票号码", "已上传家电电脑.xlsx")?;
+
+        let mut records: Vec<_> = app_up[1..]
+            .iter()
+            .filter(|row| cell_to_string(&row[status_idx]) == "审核失败")
+            .map(|row| {
+                let inv_no = cell_to_string(&row[inv_idx]);
+                let prod_name = invoice_names.get(&inv_no).cloned().unwrap_or_default();
+                FailedUploadRecord {
+                    row: row.as_slice(),
+                    extra1: prod_name,
+                    extra2: None,
+                }
+            })
+            .collect();
+
+        records.sort_by_key(|r| (r.extra1.is_empty(), r.extra1.clone()));
+        Ok(records)
+    }
+
+    pub(crate) fn extract_digital(dig_up: &'a SheetData) -> Result<Vec<Self>, String> {
+        let status_idx = dig_up.header.require("状态", "已上传明细")?;
+        let imei1_idx = dig_up
+            .header
+            .find(&["IMEI1", "imei1"])
+            .ok_or("已上传数码.xlsx: 缺少必要列 [IMEI1]")?;
+        let imei2_idx = dig_up
+            .header
+            .find(&["IMEI2", "imei2"])
+            .ok_or("已上传数码.xlsx: 缺少必要列 [IMEI2]")?;
+
+        let records: Vec<_> = dig_up[1..]
+            .iter()
+            .filter(|row| cell_to_string(&row[status_idx]) == "审核失败")
+            .map(|row| {
+                let imei1 = cell_to_string(&row[imei1_idx]);
+                let imei2 = cell_to_string(&row[imei2_idx]);
+                FailedUploadRecord {
+                    row: row.as_slice(),
+                    extra1: imei1,
+                    extra2: Some(imei2),
+                }
+            })
+            .collect();
+
+        Ok(records)
+    }
+}
+
+impl<'a> RefundAnomalySection<'a> {
+    pub(crate) fn extract(
+        refund: &'a SheetData,
+        pink: &HashSet<u32>,
+        store: &str,
+        file_label: &str,
+    ) -> Result<Self, String> {
+        if refund.is_empty() {
+            return Ok(RefundAnomalySection {
+                rows: Vec::new(),
+                ref_col_idx: 0,
+            });
+        }
+        let merchant_idx = refund.header.require("核销商编", "回款明细")?;
+        let ref_idx = refund
+            .header
+            .find(&["交易参考号"])
+            .ok_or_else(|| format!("{file_label} 缺少交易参考号"))?;
+
+        let mut matched_rows: Vec<&'a [Data]> = refund
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(index, row)| {
+                cell_to_string(&row[merchant_idx]) == store && pink.contains(&(*index as u32 + 1))
+            })
+            .map(|(_, row)| row.as_slice())
+            .collect();
+
+        let reference_counts = matched_rows.iter().fold(HashMap::new(), |mut counts, row| {
+            *counts.entry(cell_to_string(&row[ref_idx])).or_insert(0) += 1;
+            counts
         });
+
+        matched_rows.sort_by_key(|row| {
+            let reference = cell_to_string(&row[ref_idx]);
+            (
+                reference.is_empty(),
+                reference_counts[&reference] == 1,
+                reference,
+            )
+        });
+
+        Ok(RefundAnomalySection {
+            rows: matched_rows,
+            ref_col_idx: ref_idx,
+        })
     }
-    Ok(indices)
 }
 
-fn refund_indices(
-    rows: &[Vec<Data>],
-    header: &HeaderMap,
-    pink: &HashSet<u32>,
-    store: &str,
-) -> Result<Vec<usize>, String> {
-    if rows.is_empty() {
-        return Ok(Vec::new());
+impl<'a> InvoiceAnomalySection<'a> {
+    pub(crate) fn extract(invoices: &'a SheetData, colors: &AnomalyColors) -> Result<Self, String> {
+        let doc_no_idx = invoices
+            .header
+            .find(&["匹配单据号"])
+            .ok_or("发票明细缺少匹配单据号")?;
+
+        let mut collected: Vec<&'a [Data]> = invoices
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(index, _)| {
+                let row_num = *index as u32 + 1;
+                colors.invoice_yellow.contains(&row_num) && !colors.invoice_pink.contains(&row_num)
+            })
+            .map(|(_, row)| row.as_slice())
+            .collect();
+
+        collected.sort_by_key(|r| {
+            let s = cell_to_string(&r[doc_no_idx]);
+            (s.is_empty(), s)
+        });
+
+        Ok(InvoiceAnomalySection { rows: collected })
     }
-    let merchant = header.require("核销商编", "回款明细")?;
-    Ok(rows
-        .iter()
-        .enumerate()
-        .skip(1)
-        .filter(|(index, row)| {
-            cell_to_string(&row[merchant]) == store && pink.contains(&(*index as u32 + 1))
-        })
-        .map(|(index, _)| index)
-        .collect())
 }
 
 #[cfg(test)]
@@ -518,38 +632,108 @@ mod tests {
     }
 
     #[test]
-    fn selections_keep_row_order_and_distinguish_color_and_merchant_filters() {
-        let rows: Vec<Vec<Data>> = [
-            ["状态", "发票号码", "核销商编"],
-            ["审核失败", "I1", "C"],
-            ["已回款", "I2", "C"],
-            ["审核失败", "I3", "D"],
-            ["", "I4", "C"],
-        ]
-        .map(|row| row.map(|value| Data::String(value.into())).to_vec())
-        .to_vec();
-        let header = HeaderMap::from_header_row(&rows[0]);
+    fn anomaly_datasets_extract_orders_and_groups_sections() {
+        let app_rows = SheetData::new(vec![
+            vec![Data::String("状态".into()), Data::String("发票号码".into())],
+            vec![Data::String("审核失败".into()), Data::String("INV2".into())],
+            vec![Data::String("已回款".into()), Data::String("INV1".into())],
+            vec![Data::String("审核失败".into()), Data::String("INV1".into())],
+            vec![
+                Data::String("审核失败".into()),
+                Data::String("INV_NONE".into()),
+            ],
+        ]);
+        let dig_rows = SheetData::new(vec![
+            vec![
+                Data::String("状态".into()),
+                Data::String("IMEI1".into()),
+                Data::String("IMEI2".into()),
+            ],
+            vec![
+                Data::String("审核失败".into()),
+                Data::String("EM1".into()),
+                Data::String("EM2".into()),
+            ],
+            vec![
+                Data::String("审核通过".into()),
+                Data::String("EM3".into()),
+                Data::String("EM4".into()),
+            ],
+            vec![
+                Data::String("审核失败".into()),
+                Data::String("EM5".into()),
+                Data::String("EM6".into()),
+            ],
+        ]);
+        let invoice_rows = SheetData::new(vec![
+            vec![Data::String("匹配单据号".into())],
+            vec![Data::String("DOC2".into())],
+            vec![Data::String("DOC1".into())],
+            vec![Data::String("".into())],
+            vec![Data::String("DOC3".into())],
+        ]);
+        let refund_rows = SheetData::new(vec![
+            vec![
+                Data::String("核销商编".into()),
+                Data::String("交易参考号".into()),
+            ],
+            vec![Data::String("S1".into()), Data::String("R_SINGLE".into())],
+            vec![Data::String("S1".into()), Data::String("R_DUP".into())],
+            vec![Data::String("S1".into()), Data::String("R_DUP".into())],
+            vec![Data::String("S1".into()), Data::String("".into())],
+            vec![Data::String("OTHER".into()), Data::String("R_DUP".into())],
+        ]);
+
         let colors = AnomalyColors {
-            app_pink: HashSet::from([2, 4, 5]),
-            dig_pink: HashSet::from([2, 4, 5]),
-            invoice_yellow: HashSet::from([2, 4, 5]),
-            invoice_pink: HashSet::from([4]),
+            app_pink: HashSet::from([2, 3, 4, 5]),
+            dig_pink: HashSet::new(),
+            invoice_yellow: HashSet::from([2, 3, 4, 5]),
+            invoice_pink: HashSet::from([5]), // Row 5 is pink -> excluded from yellow
         };
+
         let mut names = UniqueIndex::default();
-        names.insert("I1".into(), "B".into());
-        names.insert("I3".into(), "A".into());
-        let records =
-            SummaryRecords::new([&rows; 5], [&header; 5], &colors, ["C", "D"], &names).unwrap();
-        assert_eq!(
-            (
-                records.app_failed,
-                records.dig_failed,
-                records.app_refund,
-                records.dig_refund,
-                records.invoices
-            ),
-            (vec![3, 1], vec![1, 3], vec![1, 4], vec![3], vec![1, 4])
-        );
+        names.insert("INV1".into(), "海尔冰箱".into());
+        names.insert("INV2".into(), "美的空调".into());
+
+        let datasets = AnomalyDatasets::extract(
+            [
+                &app_rows,
+                &dig_rows,
+                &invoice_rows,
+                &refund_rows,
+                &refund_rows,
+            ],
+            &colors,
+            ["S1", "S1"],
+            &names,
+        )
+        .unwrap();
+
+        // 1. App failed sorted by product name (INV1 "海尔冰箱" < INV2 "美的空调" < empty)
+        assert_eq!(datasets.app_failed.len(), 3);
+        assert_eq!(datasets.app_failed[0].extra1, "海尔冰箱");
+        assert_eq!(datasets.app_failed[1].extra1, "美的空调");
+        assert_eq!(datasets.app_failed[2].extra1, "");
+
+        // 2. Dig failed extracts IMEI1 and IMEI2 in original order
+        assert_eq!(datasets.dig_failed.len(), 2);
+        assert_eq!(datasets.dig_failed[0].extra1, "EM1");
+        assert_eq!(datasets.dig_failed[0].extra2, Some("EM2".into()));
+        assert_eq!(datasets.dig_failed[1].extra1, "EM5");
+        assert_eq!(datasets.dig_failed[1].extra2, Some("EM6".into()));
+
+        // 3. Invoices sorted by doc_no ascending with empty last (DOC1 < DOC2 < empty)
+        assert_eq!(datasets.invoices.rows.len(), 3);
+        assert_eq!(cell_to_string(&datasets.invoices.rows[0][0]), "DOC1");
+        assert_eq!(cell_to_string(&datasets.invoices.rows[1][0]), "DOC2");
+        assert_eq!(cell_to_string(&datasets.invoices.rows[2][0]), "");
+
+        // 4. Refund grouped: duplicates first (R_DUP, R_DUP), singletons second (R_SINGLE), empty last
+        assert_eq!(datasets.app_refund.rows.len(), 4);
+        assert_eq!(cell_to_string(&datasets.app_refund.rows[0][1]), "R_DUP");
+        assert_eq!(cell_to_string(&datasets.app_refund.rows[1][1]), "R_DUP");
+        assert_eq!(cell_to_string(&datasets.app_refund.rows[2][1]), "R_SINGLE");
+        assert_eq!(cell_to_string(&datasets.app_refund.rows[3][1]), "");
     }
 
     #[test]

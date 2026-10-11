@@ -3,7 +3,6 @@ use rust_decimal::Decimal;
 use rust_xlsxwriter::{
     Color, ConditionalFormatFormula, Format, Workbook, Worksheet, column_number_to_name,
 };
-use std::collections::HashMap;
 use std::path::Path;
 
 use super::excel::write_report_row;
@@ -16,9 +15,11 @@ use super::data::{CommonInputs, ReportColumn, SheetData};
 #[cfg(test)]
 use super::reader::read_sheet_rows;
 use super::summary_data::{
-    AnomalyColors, CategoryBrandSummary, MetricRow, SUMMARY_STATUSES, SummaryMetrics,
-    SummaryRecords, build_invoice_name_index,
+    AnomalyColors, AnomalyDatasets, CategoryBrandSummary, FailedUploadRecord,
+    InvoiceAnomalySection, MetricRow, RefundAnomalySection, SUMMARY_STATUSES, SummaryMetrics,
+    build_invoice_name_index,
 };
+#[cfg(test)]
 use super::unique_index::UniqueIndex;
 
 /// Generate Workbook 1: 国补上传情况汇总.xlsx (5 Sheets)
@@ -64,14 +65,7 @@ pub(crate) fn generate_with_inputs(
         invoice_yellow: inv_yellow_rows,
         invoice_pink: inv_pink_rows,
     };
-    let headers = [
-        &inputs.app_upload.header,
-        &inputs.dig_upload.header,
-        &inputs.invoices.header,
-        &inputs.app_refund.header,
-        &inputs.dig_refund.header,
-    ];
-    let records = SummaryRecords::new(
+    let datasets = AnomalyDatasets::extract(
         [
             app_upload_rows,
             dig_upload_rows,
@@ -79,7 +73,6 @@ pub(crate) fn generate_with_inputs(
             app_refund_rows,
             dig_refund_rows,
         ],
-        headers,
         &colors,
         [app_store_code, dig_store_code],
         &invoice_name_index,
@@ -97,9 +90,8 @@ pub(crate) fn generate_with_inputs(
         &styles,
         app_upload_rows,
         dig_upload_rows,
-        &invoice_name_index,
-        &records.app_failed,
-        &records.dig_failed,
+        &datasets.app_failed,
+        &datasets.dig_failed,
     )?;
 
     // Build Sheet 4: 异常回款明细
@@ -108,12 +100,12 @@ pub(crate) fn generate_with_inputs(
         &styles,
         app_refund_rows,
         dig_refund_rows,
-        &records.app_refund,
-        &records.dig_refund,
+        &datasets.app_refund,
+        &datasets.dig_refund,
     )?;
 
     // Build Sheet 5: 异常发票明细
-    build_invoice_anomaly_sheet(&mut workbook, &styles, invoice_rows, &records.invoices)?;
+    build_invoice_anomaly_sheet(&mut workbook, &styles, invoice_rows, &datasets.invoices)?;
 
     workbook
         .save(output_path)
@@ -432,9 +424,8 @@ fn build_failed_records_sheet(
     s: &StylePool,
     app_up: &SheetData,
     dig_up: &SheetData,
-    invoice_names: &UniqueIndex<String>,
-    app_failed: &[usize],
-    dig_failed: &[usize],
+    app_failed: &[FailedUploadRecord<'_>],
+    dig_failed: &[FailedUploadRecord<'_>],
 ) -> Result<(), String> {
     let ws = wb.add_worksheet();
     ws.set_name("审核失败明细").map_err(|e| e.to_string())?;
@@ -551,13 +542,8 @@ fn build_failed_records_sheet(
         Ok(())
     };
 
-    let app_h = &app_up.header;
-    let inv_idx = app_h.require("发票号码", "已上传家电电脑.xlsx")?;
-    for &index in app_failed {
-        let row = &app_up[index];
-        let inv_no = cell_to_string(&row[inv_idx]);
-        let prod_name = invoice_names.get(&inv_no).cloned().unwrap_or_default();
-        write_fail_row(ws, row, &app_columns, &prod_name, None, cur_row)?;
+    for record in app_failed {
+        write_fail_row(ws, record.row, &app_columns, &record.extra1, None, cur_row)?;
         cur_row += 1;
     }
 
@@ -599,19 +585,15 @@ fn build_failed_records_sheet(
     }
     cur_row += 1;
 
-    let dig_h = &dig_up.header;
-    let d_imei1_idx = dig_h
-        .find(&["IMEI1", "imei1"])
-        .ok_or("已上传数码.xlsx: 缺少必要列 [IMEI1]")?;
-    let d_imei2_idx = dig_h
-        .find(&["IMEI2", "imei2"])
-        .ok_or("已上传数码.xlsx: 缺少必要列 [IMEI2]")?;
-
-    for &index in dig_failed {
-        let row = &dig_up[index];
-        let imei1 = cell_to_string(&row[d_imei1_idx]);
-        let imei2 = cell_to_string(&row[d_imei2_idx]);
-        write_fail_row(ws, row, &dig_columns, &imei1, Some(&imei2), cur_row)?;
+    for record in dig_failed {
+        write_fail_row(
+            ws,
+            record.row,
+            &dig_columns,
+            &record.extra1,
+            record.extra2.as_deref(),
+            cur_row,
+        )?;
         cur_row += 1;
     }
 
@@ -623,8 +605,8 @@ fn build_refund_anomaly_sheet(
     s: &StylePool,
     app_refund_rows: &SheetData,
     dig_refund_rows: &SheetData,
-    app_indices: &[usize],
-    dig_indices: &[usize],
+    app_refund: &RefundAnomalySection<'_>,
+    dig_refund: &RefundAnomalySection<'_>,
 ) -> Result<(), String> {
     let ws = wb.add_worksheet();
     ws.set_name("异常回款明细").map_err(|e| e.to_string())?;
@@ -660,15 +642,9 @@ fn build_refund_anomaly_sheet(
     let write_section = |ws: &mut Worksheet,
                          title: &str,
                          rows: &SheetData,
-                         indices: &[usize],
-                         file_label: &str,
+                         section: &RefundAnomalySection<'_>,
                          start_row: &mut u32|
      -> Result<(), String> {
-        let h = &rows.header;
-        let ref_idx = h
-            .find(&["交易参考号"])
-            .ok_or(format!("{} 缺少交易参考号", file_label))?;
-
         ws.set_row_height(*start_row, 24.0)
             .map_err(|e| e.to_string())?;
         ws.merge_range(*start_row, 0, *start_row, 23, title, &s.section_header)
@@ -692,28 +668,14 @@ fn build_refund_anomaly_sheet(
         }
         *start_row += 1;
 
-        let mut matched_rows: Vec<&Vec<Data>> = indices.iter().map(|&index| &rows[index]).collect();
-        let reference_counts = matched_rows.iter().fold(HashMap::new(), |mut counts, row| {
-            *counts.entry(cell_to_string(&row[ref_idx])).or_insert(0) += 1;
-            counts
-        });
-        matched_rows.sort_by_key(|row| {
-            let reference = cell_to_string(&row[ref_idx]);
-            (
-                reference.is_empty(),
-                reference_counts[&reference] == 1,
-                reference,
-            )
-        });
-
         let data_start_row = *start_row;
-        for row in matched_rows {
+        for row in &section.rows {
             write_report_row(ws, s, *start_row, row, &columns)?;
             *start_row += 1;
         }
 
         if data_start_row < *start_row {
-            let reference_col = column_number_to_name(ref_idx as u16);
+            let reference_col = column_number_to_name(section.ref_col_idx as u16);
             let first_row = data_start_row + 1;
             let last_row = *start_row;
             let rule = format!(
@@ -733,8 +695,7 @@ fn build_refund_anomaly_sheet(
         ws,
         "家电电脑异常回款明细",
         app_refund_rows,
-        app_indices,
-        "回款明细家电电脑.xlsx",
+        app_refund,
         &mut cur_row,
     )?;
 
@@ -746,8 +707,7 @@ fn build_refund_anomaly_sheet(
         ws,
         "数码异常回款明细",
         dig_refund_rows,
-        dig_indices,
-        "回款明细数码.xlsx",
+        dig_refund,
         &mut cur_row,
     )?;
 
@@ -758,7 +718,7 @@ fn build_invoice_anomaly_sheet(
     wb: &mut Workbook,
     s: &StylePool,
     invoices: &SheetData,
-    indices: &[usize],
+    section: &InvoiceAnomalySection<'_>,
 ) -> Result<(), String> {
     let ws = wb.add_worksheet();
     ws.set_name("异常发票明细").map_err(|e| e.to_string())?;
@@ -810,18 +770,8 @@ fn build_invoice_anomaly_sheet(
         .enumerate()
         .map(|(col, field)| ReportColumn::new(Some(col), &cell_to_string(field)))
         .collect();
-    let h = &invoices.header;
-    let doc_no_idx = h.find(&["匹配单据号"]).ok_or("发票明细缺少匹配单据号")?;
 
-    let mut collected: Vec<&Vec<Data>> = indices.iter().map(|&index| &invoices[index]).collect();
-
-    // Sort ascending by 匹配单据号 (empty at the end)
-    collected.sort_by_key(|r| {
-        let s = cell_to_string(&r[doc_no_idx]);
-        (s.is_empty(), s)
-    });
-
-    for (cur_row, row) in (5_u32..).zip(collected) {
+    for (cur_row, row) in (5_u32..).zip(&section.rows) {
         write_report_row(ws, s, cur_row, row, &columns)?;
     }
 
@@ -1087,19 +1037,15 @@ mod status_tests {
         assert_eq!(metrics.unup.app_cnt, 3);
         let mut failures = Workbook::new();
         let empty_names = UniqueIndex::default();
+        let app_failed = FailedUploadRecord::extract_appliance(&uploads, &empty_names).unwrap();
+        let dig_failed = FailedUploadRecord::extract_digital(&uploads).unwrap();
         build_failed_records_sheet(
             &mut failures,
             &StylePool::default(),
             &uploads,
             &uploads,
-            &empty_names,
-            &super::super::summary_data::failed_indices(
-                &uploads,
-                &uploads.header,
-                Some(&empty_names),
-            )
-            .unwrap(),
-            &super::super::summary_data::failed_indices(&uploads, &uploads.header, None).unwrap(),
+            &app_failed,
+            &dig_failed,
         )
         .unwrap();
         failures.save(&output).unwrap();
