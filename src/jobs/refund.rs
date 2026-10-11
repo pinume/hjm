@@ -480,8 +480,8 @@ fn run_refund(config: &RefundConfig, input_dir: &Path) -> Result<Table, ProcessE
 /// 按`商户订单号`、`交易参考号`分别汇总回款明细"正常区域"（排除第7.5/8.5节
 /// 沉底的粉色重复记录）全部`补贴金额`（未去重，格式化为两位小数文本以统一比较）。
 pub(super) fn subsidy_indices(refund_table: &Table) -> (MultiValueIndex, MultiValueIndex) {
-    let mut by_order: MultiValueIndex = HashMap::new();
-    let mut by_reference: MultiValueIndex = HashMap::new();
+    let mut by_order = MultiValueIndex::new();
+    let mut by_reference = MultiValueIndex::new();
 
     for row in refund_table
         .rows
@@ -494,16 +494,10 @@ pub(super) fn subsidy_indices(refund_table: &Table) -> (MultiValueIndex, MultiVa
         let subsidy_text = subsidy.round_dp(2).to_string();
 
         if let Value::Text(order_no) = &row.values[MERCHANT_ORDER] {
-            by_order
-                .entry(order_no.clone())
-                .or_default()
-                .push(subsidy_text.clone());
+            by_order.insert(order_no.clone(), subsidy_text.clone());
         }
         if let Value::Text(reference) = &row.values[REFERENCE] {
-            by_reference
-                .entry(reference.clone())
-                .or_default()
-                .push(subsidy_text.clone());
+            by_reference.insert(reference.clone(), subsidy_text.clone());
         }
     }
     (by_order, by_reference)

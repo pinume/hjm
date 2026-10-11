@@ -92,7 +92,7 @@ impl PipelineContext {
     }
 
     fn build_invoice_index(records: &[invoice::InvoiceRecord]) -> Rc<MultiValueIndex> {
-        let mut grouped: MultiValueIndex = HashMap::new();
+        let mut grouped = MultiValueIndex::new();
         for record in records {
             let Value::Text(match_doc_no) = &record.match_doc_no else {
                 continue;
@@ -100,10 +100,7 @@ impl PipelineContext {
             if record.invoice_no.is_empty() {
                 continue;
             }
-            grouped
-                .entry(match_doc_no.clone())
-                .or_default()
-                .push(record.invoice_no.clone());
+            grouped.insert(match_doc_no.clone(), record.invoice_no.clone());
         }
         Rc::new(grouped)
     }
@@ -128,15 +125,12 @@ impl PipelineContext {
     }
 
     fn build_receipts_index(records: &[receipts::ReceiptRecord]) -> Rc<MultiValueIndex> {
-        let mut grouped: MultiValueIndex = HashMap::new();
+        let mut grouped = MultiValueIndex::new();
         for record in records {
             if record.match_doc_no.is_empty() || record.remark.is_empty() {
                 continue;
             }
-            grouped
-                .entry(record.match_doc_no.clone())
-                .or_default()
-                .push(record.remark.clone());
+            grouped.insert(record.match_doc_no.clone(), record.remark.clone());
         }
         Rc::new(grouped)
     }

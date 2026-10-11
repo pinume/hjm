@@ -12,7 +12,7 @@ use super::refund::{REFUND_APPLIANCE, REFUND_DIGITAL, subsidy_indices};
 use super::{
     Category, Job, MultiValueIndex, PipelineContext, PriorityOutcome, amount_value, cell_amount,
     cell_date_or_text, cell_datetime_or_text, cell_text, data_error, resolve_synonym_column,
-    resolve_via, text_value,
+    text_value,
 };
 
 /// 前25列两组数据组结构完全相同，按固定列位置读取。
@@ -499,7 +499,7 @@ pub(super) fn status_indices_in_context(
     ctx: &mut PipelineContext,
 ) -> Result<(HashMap<String, String>, MultiValueIndex), ProcessError> {
     let mut by_reference = HashMap::new();
-    let mut by_invoice_no: MultiValueIndex = HashMap::new();
+    let mut by_invoice_no = MultiValueIndex::new();
     let mut accumulate = |table: &Table| {
         for row in &table.rows {
             let Value::Text(status) = &row.values[VALUE_COL_STATUS] else {
@@ -512,10 +512,7 @@ pub(super) fn status_indices_in_context(
                 by_reference.insert(reference.clone(), status.clone());
             }
             if let Value::Text(invoice_no) = &row.values[VALUE_COL_INVOICE_NO] {
-                by_invoice_no
-                    .entry(invoice_no.clone())
-                    .or_default()
-                    .push(status.clone());
+                by_invoice_no.insert(invoice_no.clone(), status.clone());
             }
         }
     };
@@ -534,7 +531,7 @@ fn matched_refund_subsidy(
     reference: &str,
 ) -> Option<Decimal> {
     for (index, key) in [(by_order, order_no), (by_reference, reference)] {
-        match resolve_via(index, Some(key)) {
+        match index.resolve(Some(key)) {
             PriorityOutcome::Unique(value) => return Decimal::from_str(&value).ok(),
             PriorityOutcome::Ambiguous => return None,
             PriorityOutcome::NoHit => {}

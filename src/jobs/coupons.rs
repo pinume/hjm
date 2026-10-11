@@ -14,7 +14,7 @@ use crate::utils::{numbers, text};
 use super::uploaded;
 use super::{
     Category, Job, MatchStats, MultiValueIndex, PipelineContext, PriorityOutcome,
-    build_match_doc_no, cell_text, data_error, parse_date_field, resolve, resolve_via, text_value,
+    build_match_doc_no, cell_text, data_error, parse_date_field, resolve, text_value,
 };
 #[cfg(test)]
 use std::rc::Rc;
@@ -62,25 +62,15 @@ const COL_FINANCE_CATEGORY: u32 = 15;
 const COL_SUMMARY: u32 = 18;
 const COL_TOTAL: u32 = 28;
 
-struct CouponRecord {
-    doc_no: String,
-    doc_date: Value,
-    product_name: String,
-    brand: String,
-    finance_category: String,
-    subsidy: Decimal,
-    summary: String,
-}
-
-fn matched(outcome: PriorityOutcome, count: &mut usize) -> Option<String> {
-    match outcome {
-        PriorityOutcome::Unique(value) => Some(value),
-        PriorityOutcome::Ambiguous => {
-            *count += 1;
-            None
-        }
-        PriorityOutcome::NoHit => None,
-    }
+#[derive(Debug, Clone)]
+pub(crate) struct CouponRecord {
+    pub(crate) doc_no: String,
+    pub(crate) doc_date: Value,
+    pub(crate) product_name: String,
+    pub(crate) brand: String,
+    pub(crate) finance_category: String,
+    pub(crate) subsidy: Decimal,
+    pub(crate) summary: String,
 }
 
 pub struct CouponsJob;
@@ -167,39 +157,21 @@ impl Job for CouponsJob {
         let digital =
             uploaded::status_indices_in_context(input_dir, &uploaded::UPLOADED_DIGITAL, ctx)?;
 
-        let mut stats = MatchStats::default();
-        let mut rows = Vec::new();
+        let mut records = Vec::new();
         for row in 3..last_row {
-            let mut record = read_row(sheet, row, FILE_NAME, &sheet_name)?;
-            record.finance_category = normalize_finance_category(record.finance_category);
-            let (uploaded_by_reference, uploaded_by_invoice_no) =
-                if record.finance_category == "数码" {
-                    &digital
-                } else {
-                    &appliance
-                };
-            rows.push(to_row(
-                record,
-                &authority,
-                &invoice_index,
-                &receipts_index,
-                uploaded_by_reference,
-                uploaded_by_invoice_no,
-                &mut stats,
-            ));
+            records.push(read_row(sheet, row, FILE_NAME, &sheet_name)?);
         }
 
-        // 命中收款单统计备注的记录沉底并保持粉色；其余保持原相对顺序（各自稳定分区）。
-        let (mut top, bottom): (Vec<_>, Vec<_>) =
-            rows.into_iter().partition(|r| r.fill != Some(Fill::Pink));
-        top.extend(bottom);
-
-        assert_eq!(stats.hits.iter().sum::<usize>(), top.len());
-        ctx.record_stats(stats);
-        Ok(Table {
-            columns: output_columns(),
-            rows: top,
-        })
+        let mut reconciler = SalesCouponReconciler::new(
+            &authority,
+            &invoice_index,
+            &receipts_index,
+            &appliance,
+            &digital,
+        );
+        let table = reconciler.reconcile_table(records);
+        ctx.record_stats(reconciler.stats());
+        Ok(table)
     }
 }
 
@@ -277,6 +249,145 @@ fn quantity_of(subsidy: Decimal) -> i64 {
     }
 }
 
+/// 销售用券情况统计对账器：封装参考号权威校验、发票/收款单单据号关联、品类路由与多阶段备注级联
+pub(crate) struct SalesCouponReconciler<'a> {
+    authority: &'a HashSet<String>,
+    invoice_index: &'a MultiValueIndex,
+    receipts_index: &'a MultiValueIndex,
+    appliance_ref: &'a HashMap<String, String>,
+    appliance_inv: &'a MultiValueIndex,
+    digital_ref: &'a HashMap<String, String>,
+    digital_inv: &'a MultiValueIndex,
+    stats: MatchStats,
+}
+
+impl<'a> SalesCouponReconciler<'a> {
+    pub(crate) fn new(
+        authority: &'a HashSet<String>,
+        invoice_index: &'a MultiValueIndex,
+        receipts_index: &'a MultiValueIndex,
+        appliance: &'a (HashMap<String, String>, MultiValueIndex),
+        digital: &'a (HashMap<String, String>, MultiValueIndex),
+    ) -> Self {
+        Self::from_parts(
+            authority,
+            invoice_index,
+            receipts_index,
+            &appliance.0,
+            &appliance.1,
+            &digital.0,
+            &digital.1,
+        )
+    }
+
+    pub(crate) fn from_parts(
+        authority: &'a HashSet<String>,
+        invoice_index: &'a MultiValueIndex,
+        receipts_index: &'a MultiValueIndex,
+        appliance_ref: &'a HashMap<String, String>,
+        appliance_inv: &'a MultiValueIndex,
+        digital_ref: &'a HashMap<String, String>,
+        digital_inv: &'a MultiValueIndex,
+    ) -> Self {
+        Self {
+            authority,
+            invoice_index,
+            receipts_index,
+            appliance_ref,
+            appliance_inv,
+            digital_ref,
+            digital_inv,
+            stats: MatchStats::default(),
+        }
+    }
+
+    pub(crate) fn reconcile_record(&mut self, record: CouponRecord) -> Row {
+        let quantity = quantity_of(record.subsidy);
+        let match_doc_no = build_match_doc_no(&record.doc_date, &record.doc_no);
+        let reference = reference_outcome(&record.summary, self.authority)
+            .into_unique(&mut self.stats.ambiguous[0]);
+        let invoice_no = self
+            .invoice_index
+            .resolve(Some(&match_doc_no))
+            .into_unique(&mut self.stats.ambiguous[1]);
+        let receipts_hit = self
+            .receipts_index
+            .resolve(Some(&match_doc_no))
+            .into_unique(&mut self.stats.ambiguous[2]);
+        let fill = receipts_hit.is_some().then_some(Fill::Pink);
+
+        let finance_category = normalize_finance_category(record.finance_category);
+        let (uploaded_by_ref, uploaded_by_inv) = if finance_category == "数码" {
+            (self.digital_ref, self.digital_inv)
+        } else {
+            (self.appliance_ref, self.appliance_inv)
+        };
+
+        let remark = if let Some(value) = receipts_hit {
+            self.stats.hits[0] += 1;
+            Some(value)
+        } else if let Some(status) = reference
+            .as_ref()
+            .and_then(|key| uploaded_by_ref.get(key))
+            .filter(|status| !status.is_empty())
+        {
+            self.stats.hits[1] += 1;
+            Some(status.clone())
+        } else {
+            let value = uploaded_by_inv
+                .resolve(invoice_no.as_deref())
+                .into_unique(&mut self.stats.ambiguous[3]);
+            self.stats.hits[if value.is_some() { 2 } else { 3 }] += 1;
+            value
+        };
+
+        // 10.12.3 节：两阶段均未命中（含歧义、空键）时，备注固定填“未上传”，不沉底不填色；
+        // 空值从不参与前两阶段的匹配，这里只是给最终仍为空的结果一个统一的文本标记。
+        let remark_text = remark.unwrap_or_else(|| "未上传".to_string());
+
+        let values = vec![
+            text_value(record.doc_no),
+            record.doc_date,
+            text_value(record.product_name),
+            text_value(normalize_brand(record.brand)),
+            text_value(finance_category),
+            Value::Decimal(record.subsidy),
+            Value::Integer(quantity),
+            reference.map_or(Value::Empty, Value::Text),
+            invoice_no.map_or(Value::Empty, Value::Text),
+            text_value(match_doc_no),
+            Value::Text(remark_text),
+        ];
+        Row { values, fill }
+    }
+
+    pub(crate) fn reconcile_table(
+        &mut self,
+        records: impl IntoIterator<Item = CouponRecord>,
+    ) -> Table {
+        let rows: Vec<Row> = records
+            .into_iter()
+            .map(|record| self.reconcile_record(record))
+            .collect();
+
+        // 命中收款单统计备注的记录沉底并保持粉色；其余保持原相对顺序（各自稳定分区）。
+        let (mut top, bottom): (Vec<_>, Vec<_>) =
+            rows.into_iter().partition(|r| r.fill != Some(Fill::Pink));
+        top.extend(bottom);
+
+        assert_eq!(self.stats.hits.iter().sum::<usize>(), top.len());
+        Table {
+            columns: output_columns(),
+            rows: top,
+        }
+    }
+
+    pub(crate) fn stats(&self) -> MatchStats {
+        self.stats
+    }
+}
+
+#[cfg(test)]
 fn to_row(
     record: CouponRecord,
     authority: &HashSet<String>,
@@ -286,59 +397,21 @@ fn to_row(
     uploaded_by_invoice_no: &MultiValueIndex,
     stats: &mut MatchStats,
 ) -> Row {
-    let quantity = quantity_of(record.subsidy);
-    let match_doc_no = build_match_doc_no(&record.doc_date, &record.doc_no);
-    let reference = matched(
-        reference_outcome(&record.summary, authority),
-        &mut stats.ambiguous[0],
+    let empty_map = HashMap::new();
+    let empty_index = MultiValueIndex::new();
+    let mut reconciler = SalesCouponReconciler::from_parts(
+        authority,
+        invoice_index,
+        receipts_index,
+        uploaded_by_reference,
+        uploaded_by_invoice_no,
+        &empty_map,
+        &empty_index,
     );
-    let invoice_no = matched(
-        resolve_via(invoice_index, Some(&match_doc_no)),
-        &mut stats.ambiguous[1],
-    );
-    let receipts_hit = matched(
-        resolve_via(receipts_index, Some(&match_doc_no)),
-        &mut stats.ambiguous[2],
-    );
-    let fill = receipts_hit.is_some().then_some(Fill::Pink);
-    let remark = if let Some(value) = receipts_hit {
-        stats.hits[0] += 1;
-        Some(value)
-    } else {
-        if let Some(status) = reference
-            .as_ref()
-            .and_then(|key| uploaded_by_reference.get(key))
-            .filter(|status| !status.is_empty())
-        {
-            stats.hits[1] += 1;
-            Some(status.clone())
-        } else {
-            let value = matched(
-                resolve_via(uploaded_by_invoice_no, invoice_no.as_deref()),
-                &mut stats.ambiguous[3],
-            );
-            stats.hits[if value.is_some() { 2 } else { 3 }] += 1;
-            value
-        }
-    };
-    // 10.12.3 节：两阶段均未命中（含歧义、空键）时，备注固定填“未上传”，不沉底不填色；
-    // 空值从不参与前两阶段的匹配，这里只是给最终仍为空的结果一个统一的文本标记。
-    let remark_text = remark.unwrap_or_else(|| "未上传".to_string());
-
-    let values = vec![
-        text_value(record.doc_no),
-        record.doc_date,
-        text_value(record.product_name),
-        text_value(normalize_brand(record.brand)),
-        text_value(record.finance_category),
-        Value::Decimal(record.subsidy),
-        Value::Integer(quantity),
-        reference.map_or(Value::Empty, Value::Text),
-        invoice_no.map_or(Value::Empty, Value::Text),
-        text_value(match_doc_no),
-        Value::Text(remark_text),
-    ];
-    Row { values, fill }
+    reconciler.stats = *stats;
+    let row = reconciler.reconcile_record(record);
+    *stats = reconciler.stats;
+    row
 }
 
 /// 10.11 节品牌归并：仅替换列出的原值，其余原样保留。
@@ -417,7 +490,7 @@ fn output_columns() -> Vec<Column> {
 
 #[cfg(test)]
 fn extract_reference(summary: &str, authority: &HashSet<String>) -> Option<String> {
-    matched(reference_outcome(summary, authority), &mut 0)
+    reference_outcome(summary, authority).into_unique(&mut 0)
 }
 
 fn reference_outcome(summary: &str, authority: &HashSet<String>) -> PriorityOutcome {
@@ -1725,9 +1798,14 @@ mod tests {
         let authority = authority_of(&["11111111111N", "22222222222N"]);
         let date = Value::Date(chrono::NaiveDate::from_ymd_opt(2026, 8, 29).unwrap());
         let key = build_match_doc_no(&date, "ZFFX000001");
-        let invoices = HashMap::from([(key.clone(), vec!["invoice-a".into(), "invoice-b".into()])]);
-        let receipts = HashMap::from([(key, vec!["remark-a".into(), "remark-b".into()])]);
+        let mut invoices = MultiValueIndex::new();
+        invoices.insert(&key, "invoice-a");
+        invoices.insert(&key, "invoice-b");
+        let mut receipts = MultiValueIndex::new();
+        receipts.insert(&key, "remark-a");
+        receipts.insert(&key, "remark-b");
         let uploaded = HashMap::from([("11111111111N".into(), "status-a".into())]);
+        let empty_index = MultiValueIndex::new();
         let mut stats = MatchStats::default();
         for summary in ["11111111111N 22222222222N", "11111111111N"] {
             let row = to_row(
@@ -1744,7 +1822,7 @@ mod tests {
                 &invoices,
                 &receipts,
                 &uploaded,
-                &HashMap::new(),
+                &empty_index,
                 &mut stats,
             );
             assert_eq!(
@@ -1762,5 +1840,130 @@ mod tests {
         }
         assert_eq!(stats.hits, [0, 1, 0, 1]);
         assert_eq!(stats.ambiguous, [1, 2, 2, 0]);
+    }
+
+    #[test]
+    fn sales_coupon_reconciler_routes_categories_and_executes_cascade() {
+        let authority = authority_of(&["11111111111N", "22222222222N"]);
+        let date = Value::Date(chrono::NaiveDate::from_ymd_opt(2026, 8, 29).unwrap());
+        let doc_app = build_match_doc_no(&date, "DOC_APP");
+        let doc_dig = build_match_doc_no(&date, "DOC_DIG");
+        let doc_receipt = build_match_doc_no(&date, "DOC_RECEIPT");
+
+        let mut invoices = MultiValueIndex::new();
+        invoices.insert(&doc_app, "INV_APP");
+        invoices.insert(&doc_dig, "INV_DIG");
+
+        let mut receipts = MultiValueIndex::new();
+        receipts.insert(&doc_receipt, "退货");
+
+        let app_ref = HashMap::from([("11111111111N".into(), "家电参考号已审核".into())]);
+        let mut app_inv = MultiValueIndex::new();
+        app_inv.insert("INV_APP", "家电发票已回款");
+
+        let dig_ref = HashMap::from([("22222222222N".into(), "数码参考号待审核".into())]);
+        let mut dig_inv = MultiValueIndex::new();
+        dig_inv.insert("INV_DIG", "数码发票审核失败");
+
+        let appliance_indices = (app_ref, app_inv);
+        let digital_indices = (dig_ref, dig_inv);
+
+        let mut reconciler = SalesCouponReconciler::new(
+            &authority,
+            &invoices,
+            &receipts,
+            &appliance_indices,
+            &digital_indices,
+        );
+
+        let records = vec![
+            // 1. Stage 1: Receipts hit -> Pink, sinks to bottom
+            CouponRecord {
+                doc_no: "DOC_RECEIPT".into(),
+                doc_date: date.clone(),
+                product_name: "微波炉".into(),
+                brand: "美的".into(),
+                finance_category: "国产彩电".into(), // Normalized to 彩电 (appliance)
+                subsidy: Decimal::new(100, 0),
+                summary: "".into(),
+            },
+            // 2. Stage 2: Appliance reference match -> "家电参考号已审核"
+            CouponRecord {
+                doc_no: "OTHER_DOC1".into(),
+                doc_date: date.clone(),
+                product_name: "空调".into(),
+                brand: "华凌".into(),            // Normalized to 美的
+                finance_category: "空调".into(), // appliance
+                subsidy: Decimal::new(200, 0),
+                summary: "11111111111N".into(),
+            },
+            // 3. Stage 2: Digital reference match -> "数码参考号待审核"
+            CouponRecord {
+                doc_no: "OTHER_DOC2".into(),
+                doc_date: date.clone(),
+                product_name: "手机".into(),
+                brand: "华为".into(),
+                finance_category: "新业务类".into(), // Normalized to 数码 (digital)
+                subsidy: Decimal::new(300, 0),
+                summary: "22222222222N".into(),
+            },
+            // 4. Stage 3: Digital invoice match -> "数码发票审核失败"
+            CouponRecord {
+                doc_no: "DOC_DIG".into(),
+                doc_date: date.clone(),
+                product_name: "平板".into(),
+                brand: "荣耀".into(),
+                finance_category: "数码".into(), // digital
+                subsidy: Decimal::new(400, 0),
+                summary: "".into(),
+            },
+            // 5. Stage 4: Unmatched -> "未上传"
+            CouponRecord {
+                doc_no: "UNMATCHED".into(),
+                doc_date: date.clone(),
+                product_name: "电扇".into(),
+                brand: "格力".into(),
+                finance_category: "生活电器".into(),
+                subsidy: Decimal::new(50, 0),
+                summary: "".into(),
+            },
+        ];
+
+        let table = reconciler.reconcile_table(records);
+        assert_eq!(table.rows.len(), 5);
+
+        // Receipts hit (Row 1) must sink to bottom with Pink fill
+        assert_eq!(table.rows[4].fill, Some(Fill::Pink));
+        assert_eq!(table.rows[4].values[10], Value::Text("退货".into()));
+        assert_eq!(table.rows[4].values[4], Value::Text("彩电".into())); // category normalized
+
+        // Non-pink rows keep original relative order
+        assert_eq!(table.rows[0].fill, None);
+        assert_eq!(table.rows[0].values[3], Value::Text("美的".into())); // brand normalized
+        assert_eq!(
+            table.rows[0].values[10],
+            Value::Text("家电参考号已审核".into())
+        );
+
+        assert_eq!(table.rows[1].fill, None);
+        assert_eq!(table.rows[1].values[4], Value::Text("数码".into()));
+        assert_eq!(
+            table.rows[1].values[10],
+            Value::Text("数码参考号待审核".into())
+        );
+
+        assert_eq!(table.rows[2].fill, None);
+        assert_eq!(
+            table.rows[2].values[10],
+            Value::Text("数码发票审核失败".into())
+        );
+
+        assert_eq!(table.rows[3].fill, None);
+        assert_eq!(table.rows[3].values[10], Value::Text("未上传".into()));
+
+        // Check stats
+        let stats = reconciler.stats();
+        assert_eq!(stats.hits, [1, 2, 1, 1]); // Stage1: 1, Stage2: 2, Stage3: 1, Stage4: 1
+        assert_eq!(stats.ambiguous, [0, 0, 0, 0]);
     }
 }
