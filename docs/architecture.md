@@ -33,6 +33,8 @@
 
 清洗后的 Excel 继续作为清洗与报表的边界，异常颜色和日期类型从文件读取。原始 Excel 的读取器与报表读取器分别服务不同的数据契约，不强行合并。
 
+金额在这条边界上经过一次往返：清洗层的 `Decimal` 由 `write_table()` 转为 `f64`，写入 XLSX 数值单元格；报表读取层再由 `cell_to_decimal()` 把 `Data::Float` 转回 `Decimal`。写出时不做舍入，`0.00` 只是显示格式。转回时统一使用 `Decimal::from_f64`，与清洗层一致，不使用 `from_f64_retain`：后者保留二进制浮点尾差，会使理论为零的累计值通不过 `is_zero()`，使零分母比例（见[报表规则第 4.1 节](reporting-rules.md)）和汇总格的 `-` 显示失效。`clippy.toml` 禁用了 `from_f64_retain`。`from_f64` 按约 15 位有效数字规整，更高精度的数值会被舍弃；`src/reporting/float_roundtrip_tests.rs` 经真实 XLSX 往返覆盖该契约。
+
 `io/paths.rs` 集中定义 `国补明细/` 和 `国补报表/`，用于路径保护、目录创建和报表调度。旧英文输出目录不迁移、不读取。原始工作簿按工作表原顺序调用 `worksheet_range()`，任一读取错误包含文件路径、工作表名和原因；对应类别不发布，其余类别继续。
 
 ## 收款单退货识别
