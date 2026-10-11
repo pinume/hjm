@@ -190,6 +190,8 @@ fn zero_amount_and_count_summary_cell_stays_zero_after_roundtrip() {
     );
 }
 
+// 本测试有意调用被 clippy.toml 禁用的 `from_f64_retain`，用于对照两种转换的差异。
+#[allow(clippy::disallowed_methods)]
 #[test]
 fn from_f64_and_from_f64_retain_differ_on_binary_fractions() {
     for text in ["0.1", "0.29", "299.85"] {

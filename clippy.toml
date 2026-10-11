@@ -1,0 +1,3 @@
+disallowed-methods = [
+    { path = "rust_decimal::Decimal::from_f64_retain", reason = "保留二进制浮点尾差，使理论为零的累计值通不过 is_zero()；请使用 Decimal::from_f64（见 src/reporting/reader.rs 的 cell_to_decimal）" },
+]
