@@ -22,7 +22,7 @@ use std::rc::Rc;
 const FILE_NAME: &str = "销售用券情况统计.xlsx";
 const TITLE: &str = "销售用券情况统计";
 
-const SOURCE_HEADERS: [&str; 28] = [
+pub(crate) const SOURCE_HEADERS: [&str; 28] = [
     "供应商",
     "原始供应商",
     "单据号",
@@ -96,50 +96,9 @@ impl Job for CouponsJob {
         // 10.1 节：先校验本任务自身输入文件的结构，再进入依赖外部数据源的字段生成步骤，
         // 确保输入文件本身的问题不会被外部依赖缺失的错误提示掩盖。
         let path = input_dir.join(FILE_NAME);
-        if !path.is_file() {
-            return Err(ProcessError::NoInput {
-                pattern: FILE_NAME.to_string(),
-            });
-        }
-
-        let sheets = open_sheets(&path)?;
-        if sheets.len() != 1 {
-            return Err(ProcessError::Structure {
-                file: FILE_NAME.to_string(),
-                sheet: String::new(),
-                detail: format!("工作表数量异常：应为 1 个，实际为 {} 个", sheets.len()),
-            });
-        }
-        let sheet = &sheets[0];
+        let sheet = load_source(&path)?;
         let sheet_name = sheet.name().to_string();
-
-        let title = sheet.cell(1, 1).to_string();
-        if title != TITLE {
-            return Err(ProcessError::Structure {
-                file: FILE_NAME.to_string(),
-                sheet: sheet_name,
-                detail: format!("第1行第1列应为“{TITLE}”，实际为“{title}”"),
-            });
-        }
-
-        let header = sheet.row_texts(2);
-        if header.iter().map(String::as_str).collect::<Vec<_>>() != SOURCE_HEADERS {
-            return Err(ProcessError::Structure {
-                file: FILE_NAME.to_string(),
-                sheet: sheet_name,
-                detail: "第2行表头与规定的28个字段不一致".to_string(),
-            });
-        }
-
         let last_row = sheet.last_value_row().unwrap_or(2);
-        let total_marker = sheet.cell(last_row, 1).to_string();
-        if total_marker != "合计" {
-            return Err(ProcessError::Structure {
-                file: FILE_NAME.to_string(),
-                sheet: sheet_name,
-                detail: format!("最后一个实际有值行第1列应为“合计”，实际为“{total_marker}”"),
-            });
-        }
 
         // 10.6.1：权威校验集缺失、结构异常或无法完整读取时必须停止，不得绕过校验；
         // 直接复用 unionpay::load_records 的全部校验（文件发现、表头、首尾结构）。
@@ -159,7 +118,7 @@ impl Job for CouponsJob {
 
         let mut records = Vec::new();
         for row in 3..last_row {
-            records.push(read_row(sheet, row, FILE_NAME, &sheet_name)?);
+            records.push(read_row(&sheet, row, FILE_NAME, &sheet_name)?);
         }
 
         let mut reconciler = SalesCouponReconciler::new(
@@ -173,6 +132,55 @@ impl Job for CouponsJob {
         ctx.record_stats(reconciler.stats());
         Ok(table)
     }
+}
+
+/// 第10.1–10.3节：销售源表结构校验，清洗和汇总共用同一入口。
+pub(crate) fn load_source(path: &Path) -> Result<SheetGrid, ProcessError> {
+    if !path.is_file() {
+        return Err(ProcessError::NoInput {
+            pattern: FILE_NAME.to_string(),
+        });
+    }
+
+    let mut sheets = open_sheets(path)?;
+    if sheets.len() != 1 {
+        return Err(ProcessError::Structure {
+            file: FILE_NAME.to_string(),
+            sheet: String::new(),
+            detail: format!("工作表数量异常：应为 1 个，实际为 {} 个", sheets.len()),
+        });
+    }
+    let sheet = sheets.remove(0);
+    let sheet_name = sheet.name().to_string();
+
+    let title = sheet.cell(1, 1).to_string();
+    if title != TITLE {
+        return Err(ProcessError::Structure {
+            file: FILE_NAME.to_string(),
+            sheet: sheet_name,
+            detail: format!("第1行第1列应为“{TITLE}”，实际为“{title}”"),
+        });
+    }
+
+    let header = sheet.row_texts(2);
+    if header.iter().map(String::as_str).collect::<Vec<_>>() != SOURCE_HEADERS {
+        return Err(ProcessError::Structure {
+            file: FILE_NAME.to_string(),
+            sheet: sheet_name,
+            detail: "第2行表头与规定的28个字段不一致".to_string(),
+        });
+    }
+
+    let last_row = sheet.last_value_row().unwrap_or(2);
+    let total_marker = sheet.cell(last_row, 1).to_string();
+    if total_marker != "合计" {
+        return Err(ProcessError::Structure {
+            file: FILE_NAME.to_string(),
+            sheet: sheet_name,
+            detail: format!("最后一个实际有值行第1列应为“合计”，实际为“{total_marker}”"),
+        });
+    }
+    Ok(sheet)
 }
 
 /// 补贴额：取源字段`合计`，按 10.7 节尾差规则统一为两位小数；为空或超出容差时终止。
@@ -316,7 +324,8 @@ impl<'a> SalesCouponReconciler<'a> {
             .into_unique(&mut self.stats.ambiguous[2]);
         let fill = receipts_hit.is_some().then_some(Fill::Pink);
 
-        let identity = crate::utils::product::ProductIdentity::from_sales(
+        let identity = crate::utils::product::ProductIdentity::from_sales_product(
+            &record.product_name,
             &record.brand,
             &record.finance_category,
         );

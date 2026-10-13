@@ -22,16 +22,22 @@ use super::summary_data::{
 #[cfg(test)]
 use super::unique_index::UniqueIndex;
 
-/// Generate Workbook 1: 国补上传情况汇总.xlsx (5 Sheets)
-pub fn generate_summary_workbook(input_dir: &Path, output_path: &Path) -> Result<(), String> {
+/// Generate Workbook 1: 国补上传情况汇总.xlsx (5 Sheets).
+/// `input_dir` contains cleaned tables; `source_dir` supplies the raw sales coupon income columns.
+pub fn generate_summary_workbook(
+    input_dir: &Path,
+    source_dir: &Path,
+    output_path: &Path,
+) -> Result<(), String> {
     let inputs = CommonInputs::load(input_dir)?;
-    generate_with_inputs(input_dir, output_path, &inputs).map(|_| ())
+    generate_with_inputs(input_dir, output_path, &inputs, source_dir).map(|_| ())
 }
 
 pub(crate) fn generate_with_inputs(
     input_dir: &Path,
     output_path: &Path,
     inputs: &CommonInputs,
+    source_dir: &Path,
 ) -> Result<Vec<String>, String> {
     let mut workbook = Workbook::new();
     let styles = StylePool::default();
@@ -55,7 +61,12 @@ pub(crate) fn generate_with_inputs(
     let dig_store_code = &inputs.dig_store_code;
 
     // Precalculate shared metrics and lookup structures once
-    let metrics = SummaryMetrics::calculate(sales_rows, app_upload_rows, dig_upload_rows)?;
+    let metrics = SummaryMetrics::calculate_with_source(
+        sales_rows,
+        app_upload_rows,
+        dig_upload_rows,
+        &source_dir.join("销售用券情况统计.xlsx"),
+    )?;
     let category_brands = CategoryBrandSummary::from_sales(sales_rows)?;
     let invoice_name_index = build_invoice_name_index(invoice_rows)?;
 
@@ -309,8 +320,8 @@ fn build_summary_sheet(wb: &mut Workbook, s: &StylePool, m: &SummaryMetrics) -> 
     cur_row += 1;
 
     let notes = [
-        "1. 国补发生额及发生数量取自《销售用券情况统计.xlsx》；数量按“数量”字段净额统计，包含退货负数冲减。",
-        "2. “财务大类=数码”计入数码，其余财务大类计入家电电脑。",
+        "1. 国补发生额取自原始《销售用券情况统计.xlsx》的两列国补计入收入；包含退货负数冲减。",
+        "2. 家电国补计入家电电脑发生额，数码国补计入数码发生额；发生笔数仍按清洗表财务大类和数量净额统计。",
         "3. 已回款、审核通过未回款、待审核、审核失败取自两份“已上传”明细；金额汇总“补贴金额”，数量按明细记录数；审核终止不计入上述金额、笔数及失败明细。",
         "4. 未回款=国补发生额-国补回款额；未上传=未回款-审核通过未回款-待审核-审核失败。",
         "5. 回款率=国补回款额/国补发生额；综合回款率=(国补回款额+审核通过未回款额)/国补发生额。",
@@ -775,8 +786,18 @@ mod status_tests {
             }
             book.save(input.join(name)).unwrap();
         }
+        let raw = root.join("raw");
+        std::fs::create_dir(&raw).unwrap();
+        let mut source_book = Workbook::new();
+        let source_sheet = source_book.add_worksheet();
+        source_sheet.write_string(0, 0, "销售用券情况统计").unwrap();
+        for (col, field) in crate::jobs::coupons::SOURCE_HEADERS.iter().enumerate() {
+            source_sheet.write_string(1, col as u16, *field).unwrap();
+        }
+        source_sheet.write_string(2, 0, "合计").unwrap();
+        source_book.save(raw.join("销售用券情况统计.xlsx")).unwrap();
         let path = output.join("summary.xlsx");
-        generate_summary_workbook(&input, &path).unwrap();
+        generate_summary_workbook(&input, &raw, &path).unwrap();
         let mut book = open_workbook_auto(&path).unwrap();
         assert_eq!(book.sheet_names().len(), 5);
         let summary = book.worksheet_range("汇总").unwrap();
@@ -808,6 +829,9 @@ mod status_tests {
             assert!(xml.contains("<mergeCell ref=\"A9:A11\"/>"));
         }
 
+        // Missing raw coupon inputs must fail instead of silently using finance-category amounts.
+        assert!(generate_summary_workbook(&input, &root.join("missing-raw"), &path).is_err());
+
         // Verify presentation through the same standalone workbook interface.
         let mut source = Workbook::new();
         let sheet = source.add_worksheet();
@@ -837,7 +861,7 @@ mod status_tests {
             sheet.write_string(row, 4, status).unwrap();
         }
         source.save(input.join("销售用券情况统计.xlsx")).unwrap();
-        generate_summary_workbook(&input, &path).unwrap();
+        generate_summary_workbook(&input, &raw, &path).unwrap();
         let mut book = open_workbook_auto(&path).unwrap();
         let brands = book.worksheet_range("品类品牌汇总").unwrap();
         let names: Vec<_> = brands

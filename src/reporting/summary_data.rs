@@ -139,6 +139,38 @@ impl SummaryMetrics {
         ]
     }
 
+    /// 汇总 Sheet 的发生额按原始补贴券收入列计算；发生笔数及其他表仍用清洗后的财务大类。
+    pub(crate) fn calculate_with_source(
+        sales: &SheetData,
+        app_up: &SheetData,
+        dig_up: &SheetData,
+        source: &std::path::Path,
+    ) -> Result<Self, String> {
+        let mut metrics = Self::calculate(sales, app_up, dig_up)?;
+        let sheet = crate::jobs::coupons::load_source(source).map_err(|e| e.to_string())?;
+        let last = sheet.last_value_row().unwrap_or(2);
+        let mut totals = [Decimal::ZERO; 2];
+        for row in 3..last {
+            for (total, col) in totals.iter_mut().zip([26, 27]) {
+                let cell = sheet.cell(row, col);
+                let amount = crate::jobs::cell_amount(&cell)
+                    .map_err(|e| format!("销售用券源表第{row}行第{col}列：{e}"))?
+                    .unwrap_or(Decimal::ZERO);
+                *total += crate::utils::numbers::to_cents(amount)
+                    .ok_or_else(|| format!("销售用券源表第{row}行第{col}列金额尾差超出容差"))?;
+            }
+        }
+        metrics.occur.app_amt = totals[0];
+        metrics.occur.dig_amt = totals[1];
+        metrics.unpaid = metrics.occur.subtract(metrics.paid);
+        metrics.unup = metrics
+            .unpaid
+            .subtract(metrics.pass)
+            .subtract(metrics.wait)
+            .subtract(metrics.fail);
+        Ok(metrics)
+    }
+
     pub(crate) fn calculate(
         sales: &SheetData,
         app_up: &SheetData,

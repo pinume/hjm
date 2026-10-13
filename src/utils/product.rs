@@ -1,8 +1,17 @@
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 /// 产品标识值对象：封装规范化品牌与规范化财务大类。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProductIdentity {
     pub brand: String,
     pub category: String,
+}
+
+/// 已核实的商品身份及非商品费用标记；区分“明确留空”和“尚未确认”。
+struct CatalogProduct {
+    identity: ProductIdentity,
+    non_product: bool,
 }
 
 impl ProductIdentity {
@@ -19,6 +28,29 @@ impl ProductIdentity {
             brand: normalize_sales_brand(brand),
             category: normalize_finance_category(category),
         }
+    }
+
+    /// 第10.11节：优先使用销售专用核实清单，再复用发票完整名称清单；未收录名称保留原归并。
+    pub(crate) fn from_sales_product(name: &str, brand: &str, category: &str) -> Self {
+        static CATALOG: OnceLock<HashMap<&str, CatalogProduct>> = OnceLock::new();
+        if let Some(product) = catalog_product(name, include_str!("sales_products.tsv"), &CATALOG) {
+            return product.identity.clone();
+        }
+        let mut identity = Self::from_sales(brand, category);
+        if let Some(product) = Self::invoice_catalog_product(name) {
+            if product.non_product {
+                return ProductIdentity::new("", "");
+            }
+            let verified = &product.identity;
+            // 发票名称未确认的字段不能覆盖销售源表已有值；销售专用待确认项则显式留空。
+            if !verified.brand.is_empty() {
+                identity.brand = verified.brand.clone();
+            }
+            if !verified.category.is_empty() {
+                identity.category = verified.category.clone();
+            }
+        }
+        identity
     }
 
     /// 第3.3节：将发票商品类别片段映射为财务大类。
@@ -187,33 +219,44 @@ impl ProductIdentity {
 
     /// 第3.3节：已核对的完整发票商品名称精确匹配，未收录名称沿用原解析规则。
     pub(crate) fn from_invoice_catalog(name: &str) -> Option<Self> {
-        use std::collections::HashMap;
-        use std::sync::OnceLock;
+        Self::invoice_catalog_product(name).map(|product| product.identity.clone())
+    }
 
-        static CATALOG: OnceLock<HashMap<&str, ProductIdentity>> = OnceLock::new();
-        CATALOG
-            .get_or_init(|| {
-                include_str!("invoice_products.tsv")
-                    .lines()
-                    .skip(1)
-                    .map(|line| {
-                        let mut fields = line.split('\t');
-                        let name = fields.next().expect("商品名称");
-                        let category = fields.next().expect("财务大类");
-                        let brand = fields.next().expect("财务品牌");
-                        (
-                            name,
-                            Self::new(
+    fn invoice_catalog_product(name: &str) -> Option<&'static CatalogProduct> {
+        static CATALOG: OnceLock<HashMap<&str, CatalogProduct>> = OnceLock::new();
+        catalog_product(name, include_str!("invoice_products.tsv"), &CATALOG)
+    }
+}
+
+fn catalog_product(
+    name: &str,
+    source: &'static str,
+    cache: &'static OnceLock<HashMap<&'static str, CatalogProduct>>,
+) -> Option<&'static CatalogProduct> {
+    cache
+        .get_or_init(|| {
+            source
+                .lines()
+                .skip(1)
+                .map(|line| {
+                    let mut fields = line.split('\t');
+                    let name = fields.next().expect("商品名称");
+                    let category = fields.next().expect("财务大类");
+                    let brand = fields.next().expect("财务品牌");
+                    (
+                        name,
+                        CatalogProduct {
+                            identity: ProductIdentity::new(
                                 normalize_invoice_brand(brand),
                                 normalize_finance_category(category),
                             ),
-                        )
-                    })
-                    .collect()
-            })
-            .get(name)
-            .cloned()
-    }
+                            non_product: fields.nth(1) == Some("非商品费用"),
+                        },
+                    )
+                })
+                .collect()
+        })
+        .get(name)
 }
 
 /// 10.11 节品牌归并：仅替换列出的原值，其余原样保留。
@@ -381,6 +424,62 @@ mod tests {
         assert_eq!(normalize_finance_category("进口彩电"), "彩电");
         assert_eq!(normalize_finance_category("新业务类"), "数码");
         assert_eq!(normalize_finance_category("空调"), "空调"); // 未列出的类别原样保留
+    }
+
+    #[test]
+    fn verified_sales_names_override_wrong_source_fields_without_guessing() {
+        for (name, brand, category) in [
+            ("TCL-智能锁-S11SE", "TCL", "小电"),
+            (
+                "联想-电脑新-联想小新Pro16C-Ultra5-225H-32g-1T-B",
+                "联想",
+                "电脑",
+            ),
+            ("联想-电脑周边新-联想小新Pro13-8+256-B", "联想", "数码"),
+            (
+                "小米（直营店）-生态链-米家冰箱 十字439L 超薄平嵌 白",
+                "小米",
+                "冰箱",
+            ),
+            (
+                "华为-手机-Hi 畅享 80 Plus SNP-AN00(12GB+256GB)全网通版珍珠白",
+                "WIKO",
+                "数码",
+            ),
+            ("联想-电脑周边新-g75-8+256-ZM孔雀蓝", "摩托罗拉", "数码"),
+            ("OXO-其他生活小电-XF1011", "", ""),
+        ] {
+            assert_eq!(
+                ProductIdentity::from_sales_product(name, "错品牌", "错大类"),
+                ProductIdentity::new(brand, category)
+            );
+        }
+        assert_eq!(
+            ProductIdentity::from_sales_product("空调", "华凌", "空调"),
+            ProductIdentity::new("美的", "空调")
+        );
+        assert_eq!(
+            ProductIdentity::from_sales_product("未核实新名称", "华凌", "国产彩电"),
+            ProductIdentity::new("美的", "彩电")
+        );
+        assert_eq!(
+            ProductIdentity::from_sales_product("TCL-智能锁-S11SE变体", "原品牌", "原大类"),
+            ProductIdentity::new("原品牌", "原大类")
+        );
+    }
+
+    #[test]
+    fn confirmed_non_product_fees_clear_conflicting_source_brand_and_category() {
+        for name in [
+            "服务费",
+            "物业管理费",
+            "联想-电脑周边新-Lenovo care智享服务三年至五年延保服务",
+        ] {
+            assert_eq!(
+                ProductIdentity::from_sales_product(name, "联想", "新业务类"),
+                ProductIdentity::new("", ""),
+            );
+        }
     }
 
     #[test]

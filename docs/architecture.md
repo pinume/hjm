@@ -61,7 +61,7 @@
 
 ## 接口与验证
 
-库继续导出 `generate_summary_workbook`、`generate_store_finance_workbook`。独立工作簿调用自行加载共同输入，CLI 使用内部的共享输入入口。内部报表类型不作为新增公开接口。
+库继续导出 `generate_summary_workbook`、`generate_store_finance_workbook`。独立工作簿调用自行加载共同输入，CLI 使用内部的共享输入入口。`generate_summary_workbook(cleaned_dir, source_dir, output_path)`显式接收原始源目录，仅用于汇总 Sheet 的两类发生额；财务统筹接口不变。内部报表类型不作为新增公开接口。
 
 普通测试覆盖业务规则、路径保护、锁、7份输入单次解析、颜色和商户筛选及发布恢复。`tests/full_pipeline.rs` 使用小型原始 Excel 夹具，经真实 CLI 校验8类清洗、两份 Excel 报表、匹配结果与源文件未变。真实数据验收经统一 CLI 核对8份明细、两份工作簿，并比较独立工作簿接口的输出内容。业务规范见 [清洗规则](cleaning-rules.md) 与 [报表规则](reporting-rules.md)；运行命令见下节。
 

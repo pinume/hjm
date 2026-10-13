@@ -121,7 +121,7 @@ fn test_current_source_acceptance() {
     std::fs::create_dir(&standalone).unwrap();
     let standalone_summary = standalone.join("summary.xlsx");
     let standalone_finance = standalone.join("finance.xlsx");
-    generate_summary_workbook(&cleaned, &standalone_summary).unwrap();
+    generate_summary_workbook(&cleaned, &input, &standalone_summary).unwrap();
     generate_store_finance_workbook(&cleaned, &standalone_finance).unwrap();
     assert_workbook_equal(&summary_path, &standalone_summary);
     assert_workbook_equal(&finance_path, &standalone_finance);

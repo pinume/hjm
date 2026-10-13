@@ -480,6 +480,24 @@ fn check_refunds(raw: &[Table], out: &Table, merchant: &str, path: &Path) -> Vec
 }
 
 fn check_sales(raw: &Table, out: &Table, receipts: &Table, path: &Path) {
+    // Independent oracle: read verified TSV evidence directly, without calling ProductIdentity.
+    let mut catalog = HashMap::new();
+    for (text, explicit_blank) in [
+        (include_str!("../../src/utils/invoice_products.tsv"), false),
+        (include_str!("../../src/utils/sales_products.tsv"), true),
+    ] {
+        for line in text.lines().skip(1) {
+            let fields: Vec<_> = line.split('\t').collect();
+            catalog.insert(
+                fields[0],
+                (
+                    fields[2],
+                    fields[1],
+                    explicit_blank || fields[4] == "非商品费用",
+                ),
+            );
+        }
+    }
     let mut remarks: HashMap<String, HashSet<String>> = HashMap::new();
     for row in &receipts.rows {
         let remark = receipts.text(row, &["备注"]);
@@ -495,9 +513,42 @@ fn check_sales(raw: &Table, out: &Table, receipts: &Table, path: &Path) {
         let doc = raw.text(row, &["单据号"]);
         let key = match_no(raw.cell(row, &["单据日期"]), &doc);
         let pink = !key.is_empty() && remarks.get(&key).is_some_and(|r| r.len() == 1);
+        let name = raw.text(row, &["商品名称"]);
+        let source_brand = raw.text(row, &["品牌"]);
+        let source_category = raw.text(row, &["财务大类"]);
+        let brand = match source_brand.as_str() {
+            "COLMO厨热JX" | "美的厨热JX" | "东芝JX" | "华凌" | "小天鹅" | "COLMO" => {
+                "美的"
+            }
+            "卡萨帝" | "统帅" => "海尔",
+            "晶弘" => "格力",
+            value => value,
+        };
+        let category = match source_category.as_str() {
+            "国产彩电" | "进口彩电" => "彩电",
+            "新业务类" => "数码",
+            value => value,
+        };
+        let (brand, category) = match catalog.get(name.as_str()) {
+            Some((b, c, explicit_blank)) => (
+                if *explicit_blank || !b.is_empty() {
+                    *b
+                } else {
+                    brand
+                },
+                if *explicit_blank || !c.is_empty() {
+                    *c
+                } else {
+                    category
+                },
+            ),
+            None => (brand, category),
+        };
         partition[usize::from(pink)].push(vec![
             doc,
-            raw.text(row, &["商品名称"]),
+            name,
+            brand.to_string(),
+            category.to_string(),
             money(raw.cell(row, &["合计"])).normalize().to_string(),
             key,
         ]);
@@ -527,6 +578,8 @@ fn check_sales(raw: &Table, out: &Table, receipts: &Table, path: &Path) {
             vec![
                 out.text(row, &["单据号"]),
                 out.text(row, &["商品名称"]),
+                out.text(row, &["品牌"]),
+                out.text(row, &["财务大类"]),
                 amount.normalize().to_string(),
                 key,
             ]
@@ -551,8 +604,26 @@ fn number(cell: &Data) -> Decimal {
 fn check_summary(path: &Path, raw_sales: &Table, uploads: &[Table]) {
     // Reporting rules §4.1: source sales supply net occurrence; uploaded details supply status totals.
     let mut metrics = [[(Decimal::ZERO, 0_i64); 3]; 7];
+    let mut categories = HashMap::new();
+    for (evidence, explicit_blank) in [
+        (include_str!("../../src/utils/invoice_products.tsv"), false),
+        (include_str!("../../src/utils/sales_products.tsv"), true),
+    ] {
+        for line in evidence.lines().skip(1) {
+            let mut fields = line.split('\t');
+            let name = fields.next().unwrap();
+            let category = fields.next().unwrap();
+            let evidence = fields.nth(2).unwrap_or("");
+            if explicit_blank || evidence == "非商品费用" || !category.is_empty() {
+                categories.insert(name, category);
+            }
+        }
+    }
     for row in &raw_sales.rows {
-        let digital = ["数码", "新业务类"].contains(&raw_sales.text(row, &["财务大类"]).as_str());
+        let name = raw_sales.text(row, &["商品名称"]);
+        let original = raw_sales.text(row, &["财务大类"]);
+        let category = categories.get(name.as_str()).copied().unwrap_or(&original);
+        let digital = ["数码", "新业务类"].contains(&category);
         let amount = money(raw_sales.cell(row, &["合计"]));
         let entry = &mut metrics[0][usize::from(digital)];
         entry.0 += amount;
@@ -564,6 +635,17 @@ fn check_summary(path: &Path, raw_sales: &Table, uploads: &[Table]) {
             0
         };
     }
+    // Only occurrence amounts use coupon columns; occurrence counts retain finance-category routing.
+    metrics[0][0].0 = raw_sales
+        .rows
+        .iter()
+        .map(|row| money(raw_sales.cell(row, &["2026家电国补（计入收入）"])))
+        .sum();
+    metrics[0][1].0 = raw_sales
+        .rows
+        .iter()
+        .map(|row| money(raw_sales.cell(row, &["2026数码国补（计入收入）"])))
+        .sum();
     for (group, table) in uploads.iter().enumerate() {
         for row in &table.rows {
             if let Some(status) = STATUSES

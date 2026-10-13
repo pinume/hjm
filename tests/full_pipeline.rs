@@ -70,6 +70,7 @@ fn write_common_sources(input: &Path) {
                 ("品牌", "海尔"),
                 ("财务大类", "洗衣机"),
                 ("明细摘要", "16867252734N"),
+                ("2026数码国补（计入收入）", "150.00"),
                 ("合计", "150.00"),
             ],
             &[
@@ -78,6 +79,7 @@ fn write_common_sources(input: &Path) {
                 ("商品名称", "手机"),
                 ("品牌", "华为"),
                 ("财务大类", "新业务类"),
+                ("2026家电国补（计入收入）", "-15.00"),
                 ("合计", "-15.00"),
             ],
         ],
@@ -268,6 +270,17 @@ fn cli_cleans_all_eight_categories_and_publishes_two_excel_reports() {
         "退货-退单"
     );
     let reports = root.join("国补报表");
+    let mut summary = open_workbook_auto(reports.join("国补上传情况汇总.xlsx")).unwrap();
+    let occurrence = summary.worksheet_range("汇总").unwrap();
+    assert_eq!(occurrence.get_value((6, 1)), Some(&Data::Float(-0.0015)));
+    assert_eq!(occurrence.get_value((6, 3)), Some(&Data::Float(0.015)));
+    assert_eq!(occurrence.get_value((6, 2)), Some(&Data::Float(1.0)));
+    assert_eq!(occurrence.get_value((6, 4)), Some(&Data::Float(-1.0)));
+    assert_eq!(
+        field(&cleaned.join("销售用券情况统计.xlsx"), 0, 1, "财务大类"),
+        "洗衣机"
+    );
+
     assert_eq!(std::fs::read_dir(&reports).unwrap().count(), 2);
     assert_eq!(
         open_workbook_auto(reports.join("国补上传情况汇总.xlsx"))

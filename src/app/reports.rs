@@ -35,6 +35,7 @@ pub(super) fn run_all(input: &Path, cleaned: &Path, success: &HashSet<Category>)
         .parent()
         .expect("validated input has parent")
         .join(REPORT_DIR);
+    let input_source = input;
     let common_inputs = OnceCell::new();
     let mut all_ok = true;
     for (stem, dependencies, generator) in [
@@ -42,12 +43,12 @@ pub(super) fn run_all(input: &Path, cleaned: &Path, success: &HashSet<Category>)
             "国补上传情况汇总",
             SUMMARY_DEPENDENCIES,
             summary_wb::generate_with_inputs
-                as fn(&Path, &Path, &CommonInputs) -> Result<Vec<String>, String>,
+                as fn(&Path, &Path, &CommonInputs, &Path) -> Result<Vec<String>, String>,
         ),
         (
             "26年国补门店财务统筹表",
             FINANCE_DEPENDENCIES,
-            finance_wb::generate_with_inputs,
+            |cleaned, path, inputs, _| finance_wb::generate_with_inputs(cleaned, path, inputs),
         ),
     ] {
         let missing: Vec<_> = jobs::registry()
@@ -72,7 +73,7 @@ pub(super) fn run_all(input: &Path, cleaned: &Path, success: &HashSet<Category>)
                     .get_or_init(|| CommonInputs::load(input))
                     .as_ref()
                     .map_err(Clone::clone)?;
-                generator(input, path, inputs)
+                generator(input, path, inputs, input_source)
             })
         }))
         .unwrap_or_else(|payload| {
