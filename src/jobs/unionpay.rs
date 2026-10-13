@@ -6,6 +6,7 @@ use rust_decimal::Decimal;
 use crate::io::paths::list_xlsx_files;
 use crate::io::xlsx_reader::{RawCell, SheetGrid, open_sheets};
 use crate::model::{Column, ColumnType, DecimalScale, Fill, ProcessError, Row, Table, Value};
+use crate::utils::merchant::{APPLIANCE_COMPUTER_MERCHANT_NO, DIGITAL_MERCHANT_NO};
 
 use super::{
     Category, Job, PipelineContext, amount_value, cell_amount, cell_date_or_text,
@@ -104,12 +105,17 @@ pub(crate) struct UnionPayRecord {
     pub buyer_id: String,
 }
 
-/// 文件名须匹配`89813014812B06R_MX_*.xlsx`或`89813015722APT1_MX_*.xlsx`。
+/// 文件名须匹配未来城店数码或家电电脑商户号的`_MX_*.xlsx`前缀。
 fn matches_filename(name: &str) -> bool {
     let Some(stem) = name.strip_suffix(".xlsx") else {
         return false;
     };
-    stem.starts_with("89813014812B06R_MX_") || stem.starts_with("89813015722APT1_MX_")
+    [DIGITAL_MERCHANT_NO, APPLIANCE_COMPUTER_MERCHANT_NO]
+        .iter()
+        .any(|merchant| {
+            stem.strip_prefix(merchant)
+                .is_some_and(|suffix| suffix.starts_with("_MX_"))
+        })
 }
 
 fn read_record(
@@ -190,7 +196,9 @@ pub(crate) fn load_records(input_dir: &Path) -> Result<Vec<UnionPayRecord>, Proc
     files.sort();
     if files.is_empty() {
         return Err(ProcessError::NoInput {
-            pattern: "89813014812B06R_MX_*.xlsx / 89813015722APT1_MX_*.xlsx".to_string(),
+            pattern: format!(
+                "{DIGITAL_MERCHANT_NO}_MX_*.xlsx / {APPLIANCE_COMPUTER_MERCHANT_NO}_MX_*.xlsx"
+            ),
         });
     }
 
@@ -400,8 +408,8 @@ mod tests {
         retrieval_no: &'a str,
     ) -> [&'a str; 26] {
         [
-            "20260914",
-            "2026-09-14 10:18:09",
+            "20261013",
+            "2026-10-13 10:18:09",
             "T001",
             transaction_type,
             "622***1234",
@@ -414,7 +422,7 @@ mod tests {
             retrieval_no,
             "借记卡",
             "工商银行",
-            "89813014812B06R",
+            "89813014812B04P",
             "某门店",
             "门店简",
             order_no,
@@ -431,15 +439,17 @@ mod tests {
 
     #[test]
     fn ignores_files_with_unmatched_names() {
-        assert!(matches_filename("89813014812B06R_MX_20260914101809_1.xlsx"));
-        assert!(matches_filename("89813014812B06R_MX_20261001103359.xlsx"));
-        assert!(matches_filename("89813015722APT1_MX_20261001104543.xlsx"));
-        assert!(!matches_filename("89813014812B06R_MX_20260914101809_1.csv"));
-        assert!(!matches_filename("其他商户_MX_20260914101809_1.xlsx"));
+        assert!(matches_filename("89813014812B04P_MX_20261013101809_1.xlsx"));
+        assert!(matches_filename("89813014812B04P_MX_20261012103359.xlsx"));
+        assert!(matches_filename("89813015722APTB_MX_20261012104543.xlsx"));
+        assert!(!matches_filename("89813014812B99Z_MX_20261013103359.xlsx"));
+        assert!(!matches_filename("89813015722APZZ_MX_20261013104543.xlsx"));
+        assert!(!matches_filename("89813014812B04P_MX_20261013101809_1.csv"));
+        assert!(!matches_filename("其他商户_MX_20261013101809_1.xlsx"));
         assert!(!matches_filename(
-            "~$89813014812B06R_MX_20260914101809_1.xlsx"
+            "~$89813014812B04P_MX_20261013101809_1.xlsx"
         ));
-        assert!(!matches_filename("89813014812B06R_20260914101809_1.xlsx"));
+        assert!(!matches_filename("89813014812B04P_20261013101809_1.xlsx"));
     }
 
     #[test]
@@ -448,7 +458,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         write_workbook(
-            &dir.join("89813014812B06R_MX_20260914101809_1.xlsx"),
+            &dir.join("89813014812B04P_MX_20261013101809_1.xlsx"),
             "汇总1",
             &[
                 sample_row("ORDER-A", "消费", "", "16867252734N"),
@@ -456,9 +466,9 @@ mod tests {
             ],
         );
         let mut row_c = sample_row("ORDER-C", "消费", "", "16867252735N");
-        row_c[14] = "89813015722APT1";
+        row_c[14] = "89813015722APTB";
         write_workbook(
-            &dir.join("89813015722APT1_MX_20260914101900_1.xlsx"),
+            &dir.join("89813015722APTB_MX_20261013101900_1.xlsx"),
             "汇总2",
             &[row_c],
         );
@@ -497,7 +507,7 @@ mod tests {
         let dir = unique_temp_path("unionpay-ambiguous-original");
         std::fs::create_dir_all(&dir).unwrap();
         write_workbook(
-            &dir.join("89813014812B06R_MX_20260914101809_1.xlsx"),
+            &dir.join("89813014812B04P_MX_20261013101809_1.xlsx"),
             "汇总",
             &[
                 sample_row("ORDER-A", "消费", "原备注A", "16867252734N"),
@@ -522,7 +532,7 @@ mod tests {
     fn rejects_header_mismatch() {
         let dir = unique_temp_path("unionpay-bad-header");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("89813014812B06R_MX_20260914101809_1.xlsx");
+        let path = dir.join("89813014812B04P_MX_20261013101809_1.xlsx");
 
         let mut workbook = Workbook::new();
         let sheet = workbook.add_worksheet();
@@ -553,7 +563,7 @@ mod tests {
     fn rejects_wrong_trailing_notice() {
         let dir = unique_temp_path("unionpay-bad-notice");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("89813014812B06R_MX_20260914101809_1.xlsx");
+        let path = dir.join("89813014812B04P_MX_20261013101809_1.xlsx");
         write_workbook(
             &path,
             "汇总",
@@ -585,12 +595,12 @@ mod tests {
 
         let rows = [sample_row("ORDER-A", "消费", "", "16867252734N")];
         write_workbook(
-            &dir.join("89813014812B06R_MX_20260914101809_1.xlsx"),
+            &dir.join("89813014812B04P_MX_20261013101809_1.xlsx"),
             "汇总",
             &rows,
         );
         write_workbook(
-            &dir.join("89813014812B06R_MX_20260914101809_2.xlsx"),
+            &dir.join("89813014812B04P_MX_20261013101809_2.xlsx"),
             "汇总",
             &rows,
         );
@@ -608,7 +618,7 @@ mod tests {
 
         let rows = [sample_row("ORDER-A", "消费", "", "16867252734N")];
         write_workbook(
-            &dir.join("89813014812B1L3_MX_20260914101809_1.xlsx"),
+            &dir.join("89813014812B1L3_MX_20261013101809_1.xlsx"),
             "汇总",
             &rows,
         );
@@ -625,9 +635,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let mut row = sample_row("ORDER-A", "消费", "", "16867252734N");
-        row[14] = "89813015722APT1"; // 与文件名中的 89813014812B06R 不一致
+        row[14] = "89813015722APTB"; // 与文件名中的 89813014812B04P 不一致
         write_workbook(
-            &dir.join("89813014812B06R_MX_20260914101809_1.xlsx"),
+            &dir.join("89813014812B04P_MX_20261013101809_1.xlsx"),
             "汇总",
             &[row],
         );
@@ -636,7 +646,7 @@ mod tests {
         assert_eq!(table.rows.len(), 1);
         assert_eq!(
             table.rows[0].values[14],
-            Value::Text("89813015722APT1".into())
+            Value::Text("89813015722APTB".into())
         );
 
         std::fs::remove_dir_all(&dir).unwrap();

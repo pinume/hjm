@@ -63,8 +63,8 @@ mod tests {
     #[test]
     fn parses_yyyymmdd() {
         assert_eq!(
-            parse_yyyymmdd("20260914"),
-            Some(NaiveDate::from_ymd_opt(2026, 9, 14).unwrap())
+            parse_yyyymmdd("20261013"),
+            Some(NaiveDate::from_ymd_opt(2026, 10, 13).unwrap())
         );
     }
 

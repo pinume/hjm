@@ -7,6 +7,7 @@ use rust_decimal::prelude::FromPrimitive;
 use crate::io::paths::list_xlsx_files;
 use crate::io::xlsx_reader::{RawCell, SheetGrid, open_sheets};
 use crate::model::{Column, ColumnType, DecimalScale, Fill, ProcessError, Row, Table, Value};
+use crate::utils::merchant::{APPLIANCE_COMPUTER_MERCHANT_NO, DIGITAL_MERCHANT_NO};
 
 use super::{
     Category, Job, MultiValueIndex, PipelineContext, amount_value, cell_amount, cell_text,
@@ -128,7 +129,7 @@ const APPLIANCE_CONFIG: RefundConfig = RefundConfig {
     filename_suffix: "年以旧换新补贴明细.xlsx",
     field_synonyms: APPLIANCE_SYNONYMS,
     required_indices: &APPLIANCE_REQUIRED,
-    dealer_code: "89813015722APT1",
+    dealer_code: APPLIANCE_COMPUTER_MERCHANT_NO,
 };
 
 const DIGITAL_SYNONYMS: [&[&str]; 24] = [
@@ -167,7 +168,7 @@ const DIGITAL_CONFIG: RefundConfig = RefundConfig {
     filename_suffix: "年数码补贴明细.xlsx",
     field_synonyms: DIGITAL_SYNONYMS,
     required_indices: &DIGITAL_REQUIRED,
-    dealer_code: "89813014812B06R",
+    dealer_code: DIGITAL_MERCHANT_NO,
 };
 
 pub struct RefundJob(&'static RefundConfig);
@@ -811,7 +812,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let mut other_dealer_row = appliance_row("OTHER", "M2", "T2", "20.00");
-        other_dealer_row[5] = "89813015722APOTHER".to_string();
+        other_dealer_row[5] = "89813015722APZZ".to_string();
 
         write_workbook(
             &dir.join("2026年以旧换新补贴明细.xlsx"),
@@ -1093,7 +1094,7 @@ mod tests {
             sheet.write_string(row, 6, *reference).unwrap();
         }
         workbook
-            .save(dir.join(format!("MER_{merchant_no}_20260914101809yjhx.xlsx")))
+            .save(dir.join(format!("MER_{merchant_no}_20261013101809yjhx.xlsx")))
             .unwrap();
     }
 

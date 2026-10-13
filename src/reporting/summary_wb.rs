@@ -749,7 +749,7 @@ mod status_tests {
                 let merchant = headers.iter().position(|field| *field == "商户号").unwrap();
                 let status = headers.iter().position(|field| *field == "状态").unwrap();
                 sheet
-                    .write_string(1, merchant as u16, "89813015722APT1")
+                    .write_string(1, merchant as u16, "89813015722APTB")
                     .unwrap();
                 sheet.write_string(1, status as u16, "审核终止").unwrap();
             }

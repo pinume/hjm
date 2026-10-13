@@ -91,11 +91,6 @@ impl Index<&str> for MultiValueIndex {
     }
 }
 
-/// 对一组候选值去重：恰好一个不同值→`Unique`；两个及以上→`Ambiguous`；没有候选→`NoHit`。
-pub(crate) fn resolve(hits: Vec<String>) -> PriorityOutcome {
-    PriorityOutcome::resolve(hits)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

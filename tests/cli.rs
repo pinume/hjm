@@ -79,8 +79,8 @@ fn cli_runs_all_categories_without_menu_and_publishes_to_detail_dir() {
         sheet.write_string(1, col as u16, *header).unwrap();
     }
     let row: [&str; 26] = [
-        "20260914",
-        "2026-09-14 10:18:09",
+        "20261013",
+        "2026-10-13 10:18:09",
         "T001",
         "消费",
         "622***1234",
@@ -93,7 +93,7 @@ fn cli_runs_all_categories_without_menu_and_publishes_to_detail_dir() {
         "16867252734N",
         "借记卡",
         "工商银行",
-        "89813014812B06R",
+        "89813014812B04P",
         "某门店",
         "门店简",
         "ORDER1",
@@ -117,10 +117,10 @@ fn cli_runs_all_categories_without_menu_and_publishes_to_detail_dir() {
         )
         .unwrap();
     workbook
-        .save(input_dir.join("89813014812B06R_MX_20260914101809_1.xlsx"))
+        .save(input_dir.join("89813014812B04P_MX_20261013101809_1.xlsx"))
         .unwrap();
 
-    let source = input_dir.join("89813014812B06R_MX_20260914101809_1.xlsx");
+    let source = input_dir.join("89813014812B04P_MX_20261013101809_1.xlsx");
     let source_before = std::fs::read(&source).unwrap();
     let old_output = base.join("source_data");
     std::fs::create_dir_all(&old_output).unwrap();

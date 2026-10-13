@@ -14,7 +14,7 @@ use crate::utils::{numbers, text};
 use super::uploaded;
 use super::{
     Category, Job, MatchStats, MultiValueIndex, PipelineContext, PriorityOutcome,
-    build_match_doc_no, cell_text, data_error, parse_date_field, resolve, text_value,
+    build_match_doc_no, cell_text, data_error, parse_date_field, text_value,
 };
 #[cfg(test)]
 use std::rc::Rc;
@@ -417,18 +417,6 @@ fn to_row(
     row
 }
 
-/// 10.11 节品牌归并：仅替换列出的原值，其余原样保留。
-#[cfg(test)]
-pub(crate) fn normalize_brand(value: String) -> String {
-    crate::utils::product::normalize_sales_brand(&value)
-}
-
-/// 10.11 节财务大类归并：仅替换列出的原值，其余原样保留。
-#[cfg(test)]
-fn normalize_finance_category(value: String) -> String {
-    crate::utils::product::normalize_finance_category(&value)
-}
-
 fn output_columns() -> Vec<Column> {
     vec![
         Column {
@@ -491,17 +479,16 @@ fn reference_outcome(summary: &str, authority: &HashSet<String>) -> PriorityOutc
     if summary.trim().is_empty() {
         return PriorityOutcome::NoHit;
     }
-    match resolve(as_is_hits(summary, authority)) {
+    match PriorityOutcome::resolve(as_is_hits(summary, authority)) {
         PriorityOutcome::NoHit => {}
         outcome => return outcome,
     }
-    resolve(
+    PriorityOutcome::resolve(
         maximal_digit_runs(summary)
             .into_iter()
             .filter(|(start, end)| end - start == 11)
             .map(|(start, end)| format!("{}N", &summary[start..end]))
-            .filter(|candidate| authority.contains(candidate))
-            .collect(),
+            .filter(|candidate| authority.contains(candidate)),
     )
 }
 
@@ -545,39 +532,12 @@ mod tests {
     use super::*;
     use crate::jobs::{invoice, receipts, refund, unionpay, uploaded};
 
-    const MERCHANT_DIGITAL: &str = "89813014812B06R";
-    const MERCHANT_APPLIANCE: &str = "89813015722APT1";
+    const MERCHANT_DIGITAL: &str = crate::utils::merchant::DIGITAL_MERCHANT_NO;
+    const MERCHANT_APPLIANCE: &str = crate::utils::merchant::APPLIANCE_COMPUTER_MERCHANT_NO;
     use crate::test_support::unique_temp_path;
 
     fn authority_of(values: &[&str]) -> HashSet<String> {
         values.iter().map(ToString::to_string).collect()
-    }
-
-    #[test]
-    fn normalizes_listed_brands_and_keeps_others() {
-        for brand in [
-            "COLMO厨热JX",
-            "美的厨热JX",
-            "东芝JX",
-            "华凌",
-            "小天鹅",
-            "COLMO",
-        ] {
-            assert_eq!(normalize_brand(brand.to_string()), "美的");
-        }
-        for brand in ["卡萨帝", "统帅"] {
-            assert_eq!(normalize_brand(brand.to_string()), "海尔");
-        }
-        assert_eq!(normalize_brand("晶弘".to_string()), "格力");
-        assert_eq!(normalize_brand("海信".to_string()), "海信"); // 未列出的品牌原样保留
-    }
-
-    #[test]
-    fn normalizes_listed_finance_categories_and_keeps_others() {
-        assert_eq!(normalize_finance_category("国产彩电".to_string()), "彩电");
-        assert_eq!(normalize_finance_category("进口彩电".to_string()), "彩电");
-        assert_eq!(normalize_finance_category("新业务类".to_string()), "数码");
-        assert_eq!(normalize_finance_category("空调".to_string()), "空调"); // 未列出的类别原样保留
     }
 
     #[test]
@@ -637,8 +597,8 @@ mod tests {
             sheet.write_string(1, col as u16, *header).unwrap();
         }
         let row: [&str; 26] = [
-            "20260914",
-            "2026-09-14 10:18:09",
+            "20261013",
+            "2026-10-13 10:18:09",
             "T001",
             "消费",
             "622***1234",
@@ -651,7 +611,7 @@ mod tests {
             retrieval_no,
             "借记卡",
             "工商银行",
-            "89813014812B06R",
+            "89813014812B04P",
             "某门店",
             "门店简",
             "ORDER1",
@@ -669,7 +629,7 @@ mod tests {
         }
         sheet.write_string(3, 0, unionpay::D1_NOTICE).unwrap();
         workbook
-            .save(dir.join("89813014812B06R_MX_20260914101809_1.xlsx"))
+            .save(dir.join("89813014812B04P_MX_20261013101809_1.xlsx"))
             .unwrap();
     }
 
@@ -678,7 +638,7 @@ mod tests {
     fn write_invoice_fixture(dir: &Path, rows: &[(&str, &str)]) {
         let mut workbook = Workbook::new();
         let sheet = workbook.add_worksheet();
-        sheet.set_name("发票_20260914").unwrap();
+        sheet.set_name("发票_20261013").unwrap();
         for (col, header) in invoice::SOURCE_HEADERS.iter().enumerate() {
             sheet.write_string(5, col as u16, *header).unwrap();
         }
@@ -686,8 +646,8 @@ mod tests {
             let row = (6 + index) as u32;
             let values: [&str; 30] = [
                 "ORDER001",
-                "2026-09-14 09:00:00",
-                "2026-09-14 10:00:00",
+                "2026-10-13 09:00:00",
+                "2026-10-13 10:00:00",
                 "蓝票",
                 "数电发票",
                 "正常发票",
@@ -720,7 +680,7 @@ mod tests {
                 sheet.write_string(row, col as u16, *value).unwrap();
             }
         }
-        workbook.save(dir.join("发票_20260914.xlsx")).unwrap();
+        workbook.save(dir.join("发票_20261013.xlsx")).unwrap();
     }
 
     /// 构造一份最小合法的收款单统计样本（单工作表、60 字段表头、标题+表头+合计结构），
@@ -778,7 +738,7 @@ mod tests {
             sheet.write_string(row, 19, *invoice_no).unwrap(); // 发票号码
         }
         workbook
-            .save(dir.join(format!("MER_{merchant_no}_20260914101809_yjhx.xlsx")))
+            .save(dir.join(format!("MER_{merchant_no}_20261013101809_yjhx.xlsx")))
             .unwrap();
     }
 
@@ -1677,7 +1637,7 @@ mod tests {
         );
         // Removing raw fixtures proves the second run borrows cached tables.
         for merchant in [MERCHANT_APPLIANCE, MERCHANT_DIGITAL] {
-            std::fs::remove_file(dir.join(format!("MER_{merchant}_20260914101809_yjhx.xlsx")))
+            std::fs::remove_file(dir.join(format!("MER_{merchant}_20261013101809_yjhx.xlsx")))
                 .unwrap();
         }
         assert_eq!(
@@ -1726,7 +1686,7 @@ mod tests {
         assert!(ctx.invoice_index(&dir).unwrap().is_empty());
         assert!(ctx.receipts_index(&dir).unwrap().is_empty());
         // 失败读取不能留下部分成功索引。
-        std::fs::write(dir.join("发票_20261001.xlsx"), b"corrupt workbook").unwrap();
+        std::fs::write(dir.join("发票_20261014.xlsx"), b"corrupt workbook").unwrap();
         let mut fresh_ctx = super::super::PipelineContext::new();
         assert!(fresh_ctx.invoice_index(&dir).is_err());
         assert!(fresh_ctx.invoice_index(&dir).is_err());

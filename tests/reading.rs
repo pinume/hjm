@@ -52,7 +52,7 @@ fn input_dir(label: &str) -> PathBuf {
 }
 
 fn source(input: &Path, id: u32, serial: f64) -> PathBuf {
-    let path = input.join(format!("89813014812B06R_MX_20261007000000_{id}.xlsx"));
+    let path = input.join(format!("89813014812B04P_MX_20261007000000_{id}.xlsx"));
     let mut book = Workbook::new();
     let sheet = book.add_worksheet();
     sheet.write_string(0, 0, "汇总").unwrap();
@@ -70,7 +70,7 @@ fn source(input: &Path, id: u32, serial: f64) -> PathBuf {
     sheet.write_number(2, 5, 100.0).unwrap();
     sheet.write_string(2, 10, "SN001").unwrap();
     sheet.write_string(2, 11, "REF001").unwrap();
-    sheet.write_string(2, 14, "89813014812B06R").unwrap();
+    sheet.write_string(2, 14, "89813014812B04P").unwrap();
     sheet
         .write_string(
             3,

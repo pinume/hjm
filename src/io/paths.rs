@@ -213,8 +213,8 @@ mod tests {
     #[test]
     fn list_xlsx_files_filters_by_extension_and_temp_prefix() {
         let dir = scratch_dir("list-xlsx");
-        std::fs::write(dir.join("发票_20260914.xlsx"), b"x").unwrap();
-        std::fs::write(dir.join("~$发票_20260914.xlsx"), b"x").unwrap();
+        std::fs::write(dir.join("发票_20261013.xlsx"), b"x").unwrap();
+        std::fs::write(dir.join("~$发票_20261013.xlsx"), b"x").unwrap();
         std::fs::write(dir.join("说明.txt"), b"x").unwrap();
         std::fs::create_dir(dir.join("子目录.xlsx")).unwrap();
 
@@ -225,7 +225,7 @@ mod tests {
             .collect();
         files.sort();
 
-        assert_eq!(files, vec!["发票_20260914.xlsx".to_string()]);
+        assert_eq!(files, vec!["发票_20261013.xlsx".to_string()]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -22,7 +22,7 @@ pub enum Category {
 pub(crate) mod context;
 pub(crate) mod multi_value_index;
 pub use context::{MatchStats, PipelineContext};
-pub(crate) use multi_value_index::{MultiValueIndex, PriorityOutcome, resolve};
+pub(crate) use multi_value_index::{MultiValueIndex, PriorityOutcome};
 
 pub trait Job {
     fn category(&self) -> Category;

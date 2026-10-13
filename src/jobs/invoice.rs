@@ -6,6 +6,7 @@ use chrono::NaiveDate;
 use crate::io::paths::list_xlsx_files;
 use crate::io::xlsx_reader::open_sheets;
 use crate::model::{Column, ColumnType, Fill, ProcessError, Row, Table, Value};
+use crate::utils::product::{ProductIdentity, normalize_invoice_brand};
 use crate::utils::{dates, doc_no};
 
 use super::{
@@ -65,8 +66,7 @@ pub(crate) struct InvoiceRecord {
     pub invoice_no: String,
     buyer_name: String,
     product_name: String,
-    finance_category: String,
-    brand: String,
+    product_identity: ProductIdentity,
     remark: String,
     invoice_status: String,
     pub match_doc_no: Value,
@@ -119,106 +119,18 @@ fn clean_product_name(raw: &str) -> String {
 
 /// Extract the brand and category from invoice names; keep the full cleaned name intact.
 /// Unknown categories and names without a confirmed brand remain blank.
-fn split_product_name(name: &str) -> (String, String) {
+fn split_product_name(name: &str) -> ProductIdentity {
+    if let Some(identity) = ProductIdentity::from_invoice_catalog(name) {
+        return identity;
+    }
     let Some((brand, remainder)) = name.split_once('-') else {
-        let category = unseparated_finance_category(name).unwrap_or_default();
-        return (category.to_string(), brand_from_unseparated_name(name));
+        let category =
+            ProductIdentity::invoice_category_from_unseparated_name(name).unwrap_or_default();
+        return ProductIdentity::new(brand_from_unseparated_name(name), category);
     };
     let (category_token, _) = remainder.split_once('-').unwrap_or((remainder, ""));
-    let category = invoice_finance_category(category_token).unwrap_or_default();
-    (category.to_string(), normalize_invoice_brand(brand))
-}
-
-fn unseparated_finance_category(name: &str) -> Option<&'static str> {
-    match name {
-        "OPPO手机"
-        | "vivo手机"
-        | "IQOO手机"
-        | "华为手机"
-        | "一加手机"
-        | "小天才手表"
-        | "荣耀手机"
-        | "小天才电话手表"
-        | "学而思学习机"
-        | "作业帮学习机"
-        | "华为手表"
-        | "小米手机"
-        | "手机"
-        | "华为平板"
-        | "OPPO平板电脑"
-        | "平板"
-        | "苹果平板电脑"
-        | "苹果手机"
-        | "荣耀平板电脑"
-        | "手表"
-        | "一加平板"
-        | "红米手机"
-        | "OPPO手表"
-        | "华为手环"
-        | "VIVO手表"
-        | "OPPO电话手表"
-        | "苹果手表"
-        | "小天才学习机"
-        | "OPPO智能手表"
-        | "家用平板电脑"
-        | "小天才"
-        | "华为数码"
-        | "OPPO手机手机"
-        | "VIVO手机"
-        | "OPPO 平板"
-        | "华为 平板"
-        | "荣耀电话手表"
-        | "oppo手表"
-        | "vivo平板"
-        | "IQ手机"
-        | "华为智能穿戴"
-        | "vivo Y60i 6GB+128GB"
-        | "iQ手机"
-        | "ViVO手机"
-        | "HUAWEI平板电脑"
-        | "荣耀手环"
-        | "苹果平板"
-        | "长城电源"
-        | "IQOO手机手机"
-        | "VIXO手机"
-        | "iqoo手机"
-        | "手机vivo"
-        | "步步高学习机"
-        | "荣耀"
-        | "IQ00国产手机"
-        | "OPPO数码"
-        | "Reno手机" => Some("数码"),
-        "海尔空调" | "美的空调" | "卡萨帝空调" | "TCL空调" | "晶弘空调" | "奥克斯空调"
-        | "格力空调" | "海尔你空调" | "空调" | "统帅空调" | "美的中央空调" | "COLMO空调" => {
-            Some("空调")
-        }
-        "海尔冰箱" | "美菱冰箱" | "卡萨帝冰箱" | "美的冰箱" | "海尔冷柜" | "西门子电冰箱"
-        | "西门子冰箱" | "美菱电冰箱" | "美的冰柜" => Some("冰箱"),
-        "海尔洗衣机" | "卡萨帝洗衣机" | "小天鹅洗衣机" | "美菱洗衣机" | "西门子洗衣机"
-        | "西门子干衣机" => Some("洗衣机"),
-        "海尔热水器"
-        | "海尔电热水器"
-        | "卡萨帝电热水器"
-        | "海尔燃气热水器"
-        | "COLMO电热水器"
-        | "烟机灶具套餐"
-        | "卡萨帝燃气热水器"
-        | "欧意欧式烟机"
-        | "方太灶具"
-        | "COLMO燃气热水器"
-        | "卡萨帝热水器"
-        | "老板烟机"
-        | "老板灶具" => Some("厨卫"),
-        "创维电视" | "海信电视" | "TCL电视" | "海尔电视" => Some("彩电"),
-        "美的油汀" | "沁园净水类" | "美的小电风扇" | "沁园净水机" => {
-            Some("小电")
-        }
-        _ => None,
-    }
-}
-
-fn normalize_invoice_brand(brand: &str) -> String {
-    crate::utils::product::normalize_invoice_brand(brand)
+    let category = ProductIdentity::invoice_category(category_token).unwrap_or_default();
+    ProductIdentity::new(normalize_invoice_brand(brand), category)
 }
 
 fn brand_from_unseparated_name(name: &str) -> String {
@@ -268,75 +180,6 @@ fn brand_from_unseparated_name(name: &str) -> String {
     .find(|brand| lower_name.starts_with(&brand.to_ascii_lowercase()))
     .map(normalize_invoice_brand)
     .unwrap_or_default()
-}
-
-fn invoice_finance_category(token: &str) -> Option<&'static str> {
-    Some(match token {
-        "国产手机" | "合资手机" | "学习机" | "电话手表" | "手表" => "数码",
-        "空调"
-        | "家用挂机直流无氟变频1.5P35"
-        | "家用柜机直流无氟变频3P72"
-        | "风管机"
-        | "中央空调多联机"
-        | "家用挂机直流无氟变频2P50"
-        | "家用柜机直流无氟变频4P"
-        | "家用多联机外机"
-        | "家用挂机直流无氟变频1P26"
-        | "家用挂机直流无氟变频3P"
-        | "家用柜机直流无氟变频5P" => "空调",
-        "洗衣机" | "洗鞋一体机" => "洗衣机",
-        "干衣机" => "洗衣机",
-        "冰箱" | "冷柜" | "冰吧" | "冰柜" => "冰箱",
-        "电热水器"
-        | "燃气热水器"
-        | "欧式烟机"
-        | "嵌入式灶"
-        | "热水器其他"
-        | "欧式烟机CXW"
-        | "水系统"
-        | "电器"
-        | "进吸式烟机"
-        | "洗碗机cw"
-        | "洗碗机（厨卫）"
-        | "岛式烟机"
-        | "即热式热水器"
-        | "CWS"
-        | "嵌入式消毒柜"
-        | "嵌入式蒸箱\\烤箱\\微波炉" => "厨卫",
-        "彩电"
-        | "国产普通LED75寸"
-        | "国产普通LED85寸"
-        | "国产普通"
-        | "国产普通LED100寸"
-        | "国产普通LED98寸"
-        | "激光投影"
-        | "彩电艺术显示"
-        | "国产普通LED86寸"
-        | "国产激光4K88寸"
-        | "国产激光4K80寸"
-        | "国产激光LED100寸"
-        | "国产激光LED86寸"
-        | "国产艺术电视LED75寸"
-        | "壁纸电视"
-        | "国产壁纸电视LED85寸"
-        | "艺术显示彩电" => "彩电",
-        "投影仪" => "彩电",
-        "净水类"
-        | "净水类（小电）"
-        | "净水机"
-        | "洁净类"
-        | "其他生活小电"
-        | "电解水机"
-        | "锅具"
-        | "炉具"
-        | "加工机"
-        | "智能锁" => "小电",
-        "多联空调" | "多联内机" | "厨房空调器" | "厨房空调" | "多联机配件（控制器）" => {
-            "空调"
-        }
-        "国产艺术电视LED85寸" => "彩电",
-        _ => return None,
-    })
 }
 
 fn is_abnormal(record: &InvoiceRecord) -> bool {
@@ -428,7 +271,7 @@ pub(crate) fn load_records(input_dir: &Path) -> Result<Vec<InvoiceRecord>, Proce
         let buyer_name = text_at(10, "购方名称")?;
         let raw_product_name = text_at(16, "主要商品名称")?;
         let product_name = clean_product_name(&raw_product_name);
-        let (finance_category, brand) = split_product_name(&product_name);
+        let product_identity = split_product_name(&product_name);
         let remark = text_at(21, "备注信息")?;
         let invoice_status = text_at(28, "开票状态")?;
 
@@ -438,8 +281,7 @@ pub(crate) fn load_records(input_dir: &Path) -> Result<Vec<InvoiceRecord>, Proce
             invoice_no,
             buyer_name,
             product_name,
-            finance_category,
-            brand,
+            product_identity,
             match_doc_no: doc_no::MatchDocNo::from_remark(&remark)
                 .map_or(Value::Empty, |m| Value::Text(m.into_string())),
             remark,
@@ -521,6 +363,7 @@ fn output_columns() -> Vec<Column> {
 }
 
 fn to_row(record: InvoiceRecord, fill: Option<Fill>) -> Row {
+    let ProductIdentity { brand, category } = record.product_identity;
     let values = vec![
         record.issue_time,
         text_value(record.invoice_type),
@@ -530,8 +373,8 @@ fn to_row(record: InvoiceRecord, fill: Option<Fill>) -> Row {
         text_value(record.remark),
         text_value(record.invoice_status),
         record.match_doc_no,
-        text_value(record.finance_category),
-        text_value(record.brand),
+        text_value(category),
+        text_value(brand),
     ];
     Row { values, fill }
 }
@@ -550,6 +393,47 @@ mod tests {
             "小天鹅-洗衣机-TG12TP3"
         );
         assert_eq!(clean_product_name("无星号商品"), "无星号商品");
+    }
+
+    #[test]
+    fn newly_named_mobile_products_use_the_confirmed_digital_category() {
+        for category in [
+            "手机",
+            "手机串号",
+            "平板",
+            "平板电脑",
+            "智能手环",
+            "手表",
+            "智能眼镜",
+            "智能耳机",
+        ] {
+            // 第3.3节：新增型号不在精确名称表中时，仍按用户确认的类别归数码。
+            let name = format!("华为-{category}-新增型号");
+            assert_eq!(
+                split_product_name(&name),
+                ProductIdentity::new("华为", "数码")
+            );
+        }
+        assert_eq!(
+            split_product_name("华为-未核实新类别-新增型号"),
+            ProductIdentity::new("华为", "")
+        );
+        assert_eq!(
+            split_product_name("联想-电脑-新增型号"),
+            ProductIdentity::new("联想", "电脑")
+        );
+        assert_eq!(
+            split_product_name("VIVO(步步高)-手机-新增型号"),
+            ProductIdentity::new("vivo", "数码")
+        );
+        assert_eq!(
+            split_product_name("OPPO（本德）-平板电脑-新增型号"),
+            ProductIdentity::new("OPPO", "数码")
+        );
+        assert_eq!(
+            split_product_name("华为（移动）-电脑-新增型号"),
+            ProductIdentity::new("华为", "电脑")
+        );
     }
 
     fn write_invoice_workbook(path: &Path, sheet_name: &str, rows: &[[&str; 30]]) {
@@ -578,7 +462,7 @@ mod tests {
     ) -> [&'a str; 30] {
         [
             "ORDER001",
-            "2026-09-14 09:00:00",
+            "2026-10-13 09:00:00",
             issue_time,
             invoice_type,
             "数电发票",
@@ -626,8 +510,8 @@ mod tests {
         ];
         for (remark, expected) in cases {
             write_invoice_workbook(
-                &dir.join("发票_20260914.xlsx"),
-                "发票_20260914",
+                &dir.join("发票_20261013.xlsx"),
+                "发票_20261013",
                 &[sample_source_row(
                     "2026-01-25 10:00:00",
                     "蓝票",
@@ -677,8 +561,8 @@ mod tests {
         ];
         for (remark, expected) in cases {
             write_invoice_workbook(
-                &dir.join("发票_20260914.xlsx"),
-                "发票_20260914",
+                &dir.join("发票_20261013.xlsx"),
+                "发票_20261013",
                 &[sample_source_row(
                     "2026-01-25 10:00:00",
                     "蓝票",
@@ -702,8 +586,8 @@ mod tests {
         let dir = unique_temp_path("invoice-interleaved-document");
         std::fs::create_dir_all(&dir).unwrap();
         write_invoice_workbook(
-            &dir.join("发票_20260914.xlsx"),
-            "发票_20260914",
+            &dir.join("发票_20261013.xlsx"),
+            "发票_20261013",
             &[sample_source_row(
                 "2026-01-25 10:00:00",
                 "蓝票",
@@ -764,7 +648,7 @@ mod tests {
                 sample_source_row("2026-01-25 10:00:00", "蓝票", "开票完成", remark, name)
             })
             .collect();
-        write_invoice_workbook(&dir.join("发票_20260914.xlsx"), "发票_20260914", &source);
+        write_invoice_workbook(&dir.join("发票_20261013.xlsx"), "发票_20261013", &source);
         let table = InvoiceJob.run(&dir).unwrap();
         std::fs::remove_dir_all(dir).unwrap();
         assert_eq!(table.rows.len(), cases.len());
@@ -787,8 +671,8 @@ mod tests {
         let dir = unique_temp_path("invoice-blank-issue-time");
         std::fs::create_dir_all(&dir).unwrap();
         write_invoice_workbook(
-            &dir.join("发票_20260914.xlsx"),
-            "发票_20260914",
+            &dir.join("发票_20261013.xlsx"),
+            "发票_20261013",
             &[sample_source_row("", "蓝票", "开票完成", "", "商品甲")],
         );
 
@@ -835,9 +719,9 @@ mod tests {
             .collect();
         let rows: Vec<_> = raw_names
             .iter()
-            .map(|name| sample_source_row("2026-09-14 10:00:00", "蓝票", "开票完成", "", name))
+            .map(|name| sample_source_row("2026-10-13 10:00:00", "蓝票", "开票完成", "", name))
             .collect();
-        write_invoice_workbook(&dir.join("发票_20260914.xlsx"), "发票_20260914", &rows);
+        write_invoice_workbook(&dir.join("发票_20261013.xlsx"), "发票_20261013", &rows);
         let table = InvoiceJob.run(&dir).unwrap();
         assert_eq!(table.columns.len(), 10);
         assert_eq!(table.rows.len(), cases.len());
@@ -859,41 +743,41 @@ mod tests {
             &dir.join("发票_20260913.xlsx"),
             "发票_20260913",
             &[sample_source_row(
-                "2026-09-13 08:00:00",
+                "2026-10-12 08:00:00",
                 "蓝票",
                 "开票完成",
-                "销售日期:2026-09-13 单据号:收款OLD0000001",
+                "销售日期:2026-10-12 单据号:收款OLD0000001",
                 "*旧数据*不应出现",
             )],
         );
 
         write_invoice_workbook(
-            &dir.join("发票_20260914.xlsx"),
-            "发票_20260914",
+            &dir.join("发票_20261013.xlsx"),
+            "发票_20261013",
             &[
                 sample_source_row(
-                    "2026-09-14 10:00:00",
+                    "2026-10-13 10:00:00",
                     "蓝票",
                     "开票完成",
                     "销售日期:2026-07-28 单据号:收款ZEXQ000062",
                     "*家用清洁电器具*小天鹅-洗衣机-TG12TP3",
                 ),
                 sample_source_row(
-                    "2026-09-14 11:00:00",
+                    "2026-10-13 11:00:00",
                     "蓝票",
                     "开票完成",
                     "销售日期:2026-07-14 单据号:收款ZEXQ000099",
                     "重复单据商品甲",
                 ),
                 sample_source_row(
-                    "2026-09-14 11:30:00",
+                    "2026-10-13 11:30:00",
                     "蓝票",
                     "开票完成",
                     "销售日期:2026-07-14 单据号:收款ZEXQ000099",
                     "重复单据商品乙",
                 ),
                 sample_source_row(
-                    "2026-09-14 12:00:00",
+                    "2026-10-13 12:00:00",
                     "红票",
                     "开票完成",
                     "红冲",
@@ -944,11 +828,11 @@ mod tests {
     fn rejects_header_mismatch() {
         let dir = unique_temp_path("invoice-bad-header");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("发票_20260914.xlsx");
+        let path = dir.join("发票_20261013.xlsx");
 
         let mut workbook = Workbook::new();
         let sheet = workbook.add_worksheet();
-        sheet.set_name("发票_20260914").unwrap();
+        sheet.set_name("发票_20261013").unwrap();
         sheet.write_string(5, 0, "错误表头").unwrap();
         workbook.save(&path).unwrap();
 
@@ -966,7 +850,7 @@ mod tests {
             &dir.join("发票_20261399.xlsx"),
             "发票_20261399",
             &[sample_source_row(
-                "2026-09-14 10:00:00",
+                "2026-10-13 10:00:00",
                 "蓝票",
                 "开票完成",
                 "",

@@ -31,14 +31,14 @@ mod tests {
     #[test]
     fn identifier_from_float_reconstructs_integer() {
         assert_eq!(
-            identifier_from_float(20260914123456.0),
-            Some("20260914123456".to_string())
+            identifier_from_float(20261013123456.0),
+            Some("20261013123456".to_string())
         );
     }
 
     #[test]
     fn identifier_from_float_rejects_fraction() {
-        assert_eq!(identifier_from_float(20260914.5), None);
+        assert_eq!(identifier_from_float(20261013.5), None);
     }
 
     #[test]

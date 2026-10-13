@@ -7,6 +7,9 @@ use rust_decimal::Decimal;
 use crate::io::paths::list_xlsx_files;
 use crate::io::xlsx_reader::{RawCell, SheetGrid, open_sheets};
 use crate::model::{Column, ColumnType, DecimalScale, ProcessError, Row, Table, Value};
+use crate::utils::merchant::{
+    APPLIANCE_COMPUTER_MERCHANT_NO, DIGITAL_MERCHANT_NO, STORE_MERCHANT_NOS,
+};
 
 use super::refund::{REFUND_APPLIANCE, REFUND_DIGITAL, subsidy_indices};
 use super::{
@@ -288,6 +291,18 @@ pub(crate) const DIGITAL_TAIL: [TailField; TAIL_LEN] = [
     tail!("开票日期", ColumnType::Date, ["开票日期"]),
 ];
 
+struct SheetVariant {
+    name: &'static str,
+    column_synonyms: &'static [(&'static str, &'static [&'static str])],
+    optional_fields: &'static [&'static str],
+}
+
+const DIGITAL_COMPUTER_VARIANTS: [SheetVariant; 1] = [SheetVariant {
+    name: "电脑",
+    column_synonyms: &[("图片6", &["图片6", "img6"])],
+    optional_fields: &["IMEI1", "IMEI2", "oldExchangeType"],
+}];
+
 // 固定列位置（1 基）。
 
 struct UploadedConfig {
@@ -296,22 +311,25 @@ struct UploadedConfig {
     output_stem: &'static str,
     merchant_no: &'static str,
     tail: &'static [TailField; TAIL_LEN],
+    sheet_variants: &'static [SheetVariant],
 }
 
 const DIGITAL_CONFIG: UploadedConfig = UploadedConfig {
     category: Category::UploadedDigital,
     title: "数码已上传数据",
     output_stem: "已上传数码",
-    merchant_no: "89813014812B06R",
+    merchant_no: DIGITAL_MERCHANT_NO,
     tail: &DIGITAL_TAIL,
+    sheet_variants: &DIGITAL_COMPUTER_VARIANTS,
 };
 
 const APPLIANCE_CONFIG: UploadedConfig = UploadedConfig {
     category: Category::UploadedAppliance,
     title: "家电、电脑已上传数据",
     output_stem: "已上传家电电脑",
-    merchant_no: "89813015722APT1",
+    merchant_no: APPLIANCE_COMPUTER_MERCHANT_NO,
     tail: &APPLIANCE_TAIL,
+    sheet_variants: &[],
 };
 
 /// 第5.7节：未命中回款明细时，“交易金额×15%”估算补贴金额的封顶值。
@@ -382,11 +400,16 @@ fn validate_front_header(header: &[String]) -> Result<bool, String> {
     Ok(autonomous)
 }
 
-/// 前25列须按固定列位置与名称完全一致；第26列起按名称在其范围内查找（第5.1节：
-/// 数据组内部存在“电脑”等表头变体，不能仅按固定列号映射）。
+/// 文件名中的商户号选择数据组；工作表名只用于识别该组内的表头变体。前25列须按固定列
+/// 位置与名称完全一致；第26列起按名称在其范围内查找（第5.1节：数据组内部存在“电脑”等
+/// 表头变体，不能仅按固定列号映射）。
 fn resolve_columns(sheet: &SheetGrid, config: &UploadedConfig) -> Result<ResolvedColumns, String> {
     let header = sheet.row_texts(2);
     let autonomous = validate_front_header(&header)?;
+    let variant = config
+        .sheet_variants
+        .iter()
+        .find(|variant| variant.name == sheet.name());
 
     let tail_start = if autonomous {
         SHARED_FRONT_LEN
@@ -396,8 +419,19 @@ fn resolve_columns(sheet: &SheetGrid, config: &UploadedConfig) -> Result<Resolve
     let tail_domain = &header[tail_start..];
     let mut tail_columns = Vec::with_capacity(TAIL_LEN);
     for field in config.tail {
-        let resolved = resolve_synonym_column(tail_domain, field.synonyms, tail_start as u32)?;
-        if resolved.is_none() && field.required && !autonomous {
+        let synonyms = variant
+            .and_then(|variant| {
+                variant
+                    .column_synonyms
+                    .iter()
+                    .find(|(name, _)| *name == field.name)
+                    .map(|(_, synonyms)| *synonyms)
+            })
+            .unwrap_or(field.synonyms);
+        let resolved = resolve_synonym_column(tail_domain, synonyms, tail_start as u32)?;
+        let optional_for_variant =
+            variant.is_some_and(|variant| variant.optional_fields.contains(&field.name));
+        if resolved.is_none() && field.required && !optional_for_variant && !autonomous {
             return Err(format!("缺少必需字段：{}", field.name));
         }
         tail_columns.push(resolved);
@@ -568,8 +602,6 @@ fn normalize_status(value: String) -> String {
     }
 }
 
-const ALLOWED_MERCHANTS: [&str; 2] = ["89813014812B06R", "89813015722APT1"];
-
 fn collect_merchant_files(
     input_dir: &Path,
     merchant_no: &str,
@@ -579,7 +611,7 @@ fn collect_merchant_files(
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if let Some(stem) = name.strip_suffix(".xlsx")
             && stem.starts_with("MER_")
-            && !ALLOWED_MERCHANTS
+            && !STORE_MERCHANT_NOS
                 .iter()
                 .any(|m| stem.starts_with(&format!("MER_{m}_")))
         {
@@ -587,7 +619,7 @@ fn collect_merchant_files(
                 file: name.to_string(),
                 sheet: String::new(),
                 detail: format!(
-                    "发现非允许商户号的已上传文件，仅允许处理 {ALLOWED_MERCHANTS:?} 的数据"
+                    "发现非允许商户号的已上传文件，仅允许处理 {STORE_MERCHANT_NOS:?} 的数据"
                 ),
             });
         }
@@ -762,7 +794,7 @@ mod tests {
                 merchant_order,
                 "",
                 "企业甲",
-                "89813015722APT1",
+                "89813015722APTB",
                 "0.00",
                 "100.00",
                 "90.00",
@@ -800,7 +832,7 @@ mod tests {
                 reference,
                 merchant_order,
                 "企业乙",
-                "89813014812B06R",
+                "89813014812B04P",
                 "100.00",
                 subsidy,
                 "SN002",
@@ -818,8 +850,19 @@ mod tests {
     }
 
     fn write_workbook(path: &Path, title: &str, headers: &[&str], rows: &[Vec<&str>]) {
+        write_sheet_workbook(path, "Sheet1", title, headers, rows);
+    }
+
+    fn write_sheet_workbook(
+        path: &Path,
+        sheet_name: &str,
+        title: &str,
+        headers: &[&str],
+        rows: &[Vec<&str>],
+    ) {
         let mut workbook = Workbook::new();
         let sheet = workbook.add_worksheet();
+        sheet.set_name(sheet_name).unwrap();
         sheet.write_string(0, 0, title).unwrap();
         for (col, name) in headers.iter().enumerate() {
             sheet.write_string(1, col as u16, *name).unwrap();
@@ -856,8 +899,8 @@ mod tests {
             "模版A",
             "已上传",
             "描述文本",
-            "2026-09-14 10:18:09",
-            "2026-09-14 10:20:00",
+            "2026-10-13 10:18:09",
+            "2026-10-13 10:20:00",
             "T001",
             "STORE001",
             "分店甲",
@@ -886,7 +929,7 @@ mod tests {
             "IMG13",
             "IMG14",
             "IMG15",
-            "2026-09-14 12:00:00",
+            "2026-10-13 12:00:00",
             "备注甲",
             "EEG甲",
             "LOG001",
@@ -976,16 +1019,16 @@ mod tests {
         let dir = unique_temp_path("uploaded-terminal");
         std::fs::create_dir_all(&dir).unwrap();
         write_refund_appliance_fixture(&dir, &[("REF-PAID", "PAID", "", "23.45")]);
-        let mut unpaid = appliance_row("U1", "89813015722APT1", "UNPAID");
+        let mut unpaid = appliance_row("U1", "89813015722APTB", "UNPAID");
         unpaid[8] = "审核终止";
-        let mut paid = appliance_row("U2", "89813015722APT1", "PAID");
+        let mut paid = appliance_row("U2", "89813015722APTB", "PAID");
         paid[8] = "审核终止";
-        let mut ordinary = appliance_row("U3", "89813015722APT1", "NORMAL");
+        let mut ordinary = appliance_row("U3", "89813015722APTB", "NORMAL");
         ordinary[8] = "核销成功";
-        let mut unpaid2 = appliance_row("U4", "89813015722APT1", "UNPAID2");
+        let mut unpaid2 = appliance_row("U4", "89813015722APTB", "UNPAID2");
         unpaid2[8] = "审核终止";
         write_workbook(
-            &dir.join("MER_89813015722APT1_test.xlsx"),
+            &dir.join("MER_89813015722APTB_test.xlsx"),
             "家电",
             &standard_headers(&APPLIANCE_TAIL),
             &[unpaid, paid, ordinary, unpaid2],
@@ -1024,11 +1067,11 @@ mod tests {
                 ("REF001", "TWO", "INV002", "20"),
             ],
         );
-        let ordinary = appliance_row("U1", "89813015722APT1", "NOHIT");
-        let mut terminal = appliance_row("U2", "89813015722APT1", "NOHIT2");
+        let ordinary = appliance_row("U1", "89813015722APTB", "NOHIT");
+        let mut terminal = appliance_row("U2", "89813015722APTB", "NOHIT2");
         terminal[8] = "审核终止";
         write_workbook(
-            &dir.join("MER_89813015722APT1_test.xlsx"),
+            &dir.join("MER_89813015722APTB_test.xlsx"),
             "家电",
             &standard_headers(&APPLIANCE_TAIL),
             &[terminal, ordinary],
@@ -1044,24 +1087,24 @@ mod tests {
     #[test]
     fn matches_filename_checks_merchant_prefix_and_extension() {
         assert!(matches_filename(
-            "MER_89813014812B06R_20260914101809_yjhx.xlsx",
-            "89813014812B06R"
+            "MER_89813014812B04P_20261013101809_yjhx.xlsx",
+            "89813014812B04P"
         ));
         assert!(matches_filename(
-            "MER_89813014812B06R_anything.xlsx",
-            "89813014812B06R"
+            "MER_89813014812B04P_anything.xlsx",
+            "89813014812B04P"
         ));
         assert!(matches_filename(
-            "MER_89813015722APT1_20261001105241_yjhx.xlsx",
-            "89813015722APT1"
+            "MER_89813015722APTB_20261012105241_yjhx.xlsx",
+            "89813015722APTB"
         ));
         assert!(!matches_filename(
-            "MER_89813015722APT1_20260914101809_yjhx.xlsx",
-            "89813014812B06R"
+            "MER_89813015722APTB_20261013101809_yjhx.xlsx",
+            "89813014812B04P"
         ));
         assert!(!matches_filename(
-            "MER_89813014812B06R_20260914101809_yjhx.xls",
-            "89813014812B06R"
+            "MER_89813014812B04P_20261013101809_yjhx.xls",
+            "89813014812B04P"
         ));
     }
 
@@ -1071,10 +1114,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         write_refund_digital_fixture(&dir, &[]); // 回款明细无命中，补贴金额留空
         write_workbook(
-            &dir.join("MER_89813014812B06R_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813014812B04P_20261013101809_yjhx.xlsx"),
             "以旧换新数据[手机/其他3C]",
             &standard_headers(&DIGITAL_TAIL),
-            &[digital_row("UUID-1", "89813014812B06R", "ORDER-1")],
+            &[digital_row("UUID-1", "89813014812B04P", "ORDER-1")],
         );
 
         let table = UPLOADED_DIGITAL.run(&dir).unwrap();
@@ -1106,17 +1149,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         write_refund_appliance_fixture(&dir, &[]); // 回款明细无命中，补贴金额留空
         write_workbook(
-            &dir.join("MER_89813015722APT1_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813015722APTB_20261013101809_yjhx.xlsx"),
             "家电",
             &standard_headers(&APPLIANCE_TAIL),
-            &[appliance_row("UUID-2", "89813015722APT1", "ORDER-2")],
+            &[appliance_row("UUID-2", "89813015722APTB", "ORDER-2")],
         );
         // 数码商户的文件必须被家电、电脑数据组忽略。
         write_workbook(
-            &dir.join("MER_89813014812B06R_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813014812B04P_20261013101809_yjhx.xlsx"),
             "数码",
             &standard_headers(&DIGITAL_TAIL),
-            &[digital_row("UUID-3", "89813014812B06R", "ORDER-3")],
+            &[digital_row("UUID-3", "89813014812B04P", "ORDER-3")],
         );
 
         let table = UPLOADED_APPLIANCE.run(&dir).unwrap();
@@ -1156,12 +1199,12 @@ mod tests {
         headers.remove(ac_pos); // “电脑”表没有此字段
 
         // 行数据与表头做相同的插入/删除，值随其原字段一起移动，位置始终对应正确的表头。
-        let mut row = appliance_row("UUID-PC", "89813015722APT1", "ORDER-PC");
+        let mut row = appliance_row("UUID-PC", "89813015722APTB", "ORDER-PC");
         row.insert(FRONT_LEN, "电脑类型值");
         row.remove(ac_pos);
 
         write_workbook(
-            &dir.join("MER_89813015722APT1_20260914102100_yjhx.xlsx"),
+            &dir.join("MER_89813015722APTB_20261013102100_yjhx.xlsx"),
             "电脑",
             &headers,
             &[row],
@@ -1179,15 +1222,66 @@ mod tests {
     }
 
     #[test]
+    fn digital_merchant_computer_sheet_leaves_confirmed_missing_fields_blank() {
+        let dir = unique_temp_path("uploaded-digital-computer-variant");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_refund_digital_fixture(&dir, &[]);
+
+        let path = dir.join("MER_89813014812B04P_20261013101809_yjhx.xlsx");
+        let mut headers = standard_headers(&DIGITAL_TAIL);
+        let mut row = digital_row("UUID-DIGITAL-PC", "89813014812B04P", "ORDER-DIGITAL-PC");
+        let image6 = headers
+            .iter()
+            .position(|header| *header == "图片6")
+            .unwrap();
+        headers[image6] = "img6";
+        row[image6] = "DIGITAL_PC_IMAGE6";
+        for field in ["IMEI1", "IMEI2"] {
+            let index = headers.iter().position(|header| *header == field).unwrap();
+            headers.remove(index);
+            row.remove(index);
+        }
+        let old_exchange_type = headers
+            .iter()
+            .position(|header| *header == "oldExchangeType")
+            .unwrap();
+        headers.remove(old_exchange_type);
+        row.remove(old_exchange_type);
+
+        write_sheet_workbook(&path, "电脑", "标题", &headers, std::slice::from_ref(&row));
+        let table = UPLOADED_DIGITAL.run(&dir).unwrap();
+        assert_eq!(table.rows.len(), 1);
+        assert_eq!(table.rows[0].values[25], Value::Empty);
+        assert_eq!(table.rows[0].values[26], Value::Empty);
+        assert_eq!(table.rows[0].values[55], Value::Empty);
+        assert_eq!(
+            table.rows[0].values[32],
+            Value::Text("DIGITAL_PC_IMAGE6".to_string())
+        );
+
+        let required_field = headers
+            .iter()
+            .position(|header| *header == "签收时间")
+            .unwrap();
+        headers.remove(required_field);
+        row.remove(required_field);
+        write_sheet_workbook(&path, "电脑", "标题", &headers, std::slice::from_ref(&row));
+        let error = UPLOADED_DIGITAL.run(&dir).unwrap_err().to_string();
+        assert!(error.contains("签收时间"), "{error}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn preserves_merchant_mismatch_between_filename_and_row() {
         let dir = unique_temp_path("uploaded-merchant-mismatch");
         std::fs::create_dir_all(&dir).unwrap();
         write_refund_appliance_fixture(&dir, &[]);
         write_workbook(
-            &dir.join("MER_89813015722APT1_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813015722APTB_20261013101809_yjhx.xlsx"),
             "家电",
             &standard_headers(&APPLIANCE_TAIL),
-            &[appliance_row("UUID-5", "89813014812B06R", "ORDER-5")],
+            &[appliance_row("UUID-5", "89813014812B04P", "ORDER-5")],
         );
 
         let table = UPLOADED_APPLIANCE.run(&dir).unwrap();
@@ -1204,10 +1298,10 @@ mod tests {
         let mut headers = standard_headers(&APPLIANCE_TAIL);
         headers[13] = "门店编号"; // 与规定的“分店id”不一致
         write_workbook(
-            &dir.join("MER_89813015722APT1_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813015722APTB_20261013101809_yjhx.xlsx"),
             "家电",
             &headers,
-            &[appliance_row("UUID-6", "89813015722APT1", "ORDER-6")],
+            &[appliance_row("UUID-6", "89813015722APTB", "ORDER-6")],
         );
 
         let error = UPLOADED_APPLIANCE.run(&dir).unwrap_err();
@@ -1222,16 +1316,16 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         write_refund_appliance_fixture(&dir, &[]);
         write_workbook(
-            &dir.join("MER_89813015722APT1_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813015722APTB_20261013101809_yjhx.xlsx"),
             "家电",
             &standard_headers(&APPLIANCE_TAIL),
-            &[appliance_row("UUID-SAME", "89813015722APT1", "ORDER-8")],
+            &[appliance_row("UUID-SAME", "89813015722APTB", "ORDER-8")],
         );
         write_workbook(
-            &dir.join("MER_89813015722APT1_20260914101900_yjhx.xlsx"),
+            &dir.join("MER_89813015722APTB_20261013101900_yjhx.xlsx"),
             "家电",
             &standard_headers(&APPLIANCE_TAIL),
-            &[appliance_row("UUID-SAME", "89813015722APT1", "ORDER-9")],
+            &[appliance_row("UUID-SAME", "89813015722APTB", "ORDER-9")],
         );
 
         let table = UPLOADED_APPLIANCE.run(&dir).unwrap();
@@ -1245,15 +1339,15 @@ mod tests {
         let dir = unique_temp_path("uploaded-duplicate-sheet");
         std::fs::create_dir_all(&dir).unwrap();
         write_refund_appliance_fixture(&dir, &[]);
-        let rows = [appliance_row("UUID-DUP", "89813015722APT1", "ORDER-10")];
+        let rows = [appliance_row("UUID-DUP", "89813015722APTB", "ORDER-10")];
         write_workbook(
-            &dir.join("MER_89813015722APT1_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813015722APTB_20261013101809_yjhx.xlsx"),
             "家电",
             &standard_headers(&APPLIANCE_TAIL),
             &rows,
         );
         write_workbook(
-            &dir.join("MER_89813015722APT1_20260914101900_yjhx.xlsx"),
+            &dir.join("MER_89813015722APTB_20261013101900_yjhx.xlsx"),
             "家电",
             &standard_headers(&APPLIANCE_TAIL),
             &rows,
@@ -1270,11 +1364,11 @@ mod tests {
         let dir = unique_temp_path("uploaded-bad-date");
         std::fs::create_dir_all(&dir).unwrap();
         write_refund_appliance_fixture(&dir, &[]);
-        let mut row = appliance_row("UUID-11", "89813015722APT1", "ORDER-11");
+        let mut row = appliance_row("UUID-11", "89813015722APTB", "ORDER-11");
         row[4] = "不是日期";
 
         write_workbook(
-            &dir.join("MER_89813015722APT1_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813015722APTB_20261013101809_yjhx.xlsx"),
             "家电",
             &standard_headers(&APPLIANCE_TAIL),
             &[row],
@@ -1302,12 +1396,12 @@ mod tests {
         let dir = unique_temp_path("uploaded-missing-refund");
         std::fs::create_dir_all(&dir).unwrap();
         write_workbook(
-            &dir.join("MER_89813015722APT1_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813015722APTB_20261013101809_yjhx.xlsx"),
             "家电",
             &standard_headers(&APPLIANCE_TAIL),
             &[appliance_row(
                 "UUID-NOREFUND",
-                "89813015722APT1",
+                "89813015722APTB",
                 "ORDER-NOREFUND",
             )],
         );
@@ -1335,10 +1429,10 @@ mod tests {
         let dir = unique_temp_path("uploaded-status-normalize-unmatched");
         std::fs::create_dir_all(&dir).unwrap();
         write_refund_appliance_fixture(&dir, &[]); // 无命中
-        let mut row = appliance_row("UUID-G", "89813015722APT1", "ORDER-G");
+        let mut row = appliance_row("UUID-G", "89813015722APTB", "ORDER-G");
         row[VALUE_COL_STATUS] = "核销失败";
         write_workbook(
-            &dir.join("MER_89813015722APT1_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813015722APTB_20261013101809_yjhx.xlsx"),
             "家电",
             &standard_headers(&APPLIANCE_TAIL),
             &[row],
@@ -1364,10 +1458,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // 命中回款明细时“已回款”须覆盖归并结果，即使原状态在归并表中。
         write_refund_appliance_fixture(&dir, &[("NOMATCH-REF", "ORDER-H", "NOMATCH-INV", "9.99")]);
-        let mut row = appliance_row("UUID-H", "89813015722APT1", "ORDER-H");
+        let mut row = appliance_row("UUID-H", "89813015722APTB", "ORDER-H");
         row[VALUE_COL_STATUS] = "审核通过";
         write_workbook(
-            &dir.join("MER_89813015722APT1_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813015722APTB_20261013101809_yjhx.xlsx"),
             "家电",
             &standard_headers(&APPLIANCE_TAIL),
             &[row],
@@ -1409,10 +1503,10 @@ mod tests {
         let dir = unique_temp_path("uploaded-refund-estimate-cap-appliance");
         std::fs::create_dir_all(&dir).unwrap();
         write_refund_appliance_fixture(&dir, &[]); // 无命中，走估算
-        let mut row = appliance_row("UUID-I", "89813015722APT1", "ORDER-I");
+        let mut row = appliance_row("UUID-I", "89813015722APTB", "ORDER-I");
         row[VALUE_COL_TRANSACTION_AMOUNT] = "20000.00"; // ×15%=3000.00，超过家电电脑封顶1500
         write_workbook(
-            &dir.join("MER_89813015722APT1_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813015722APTB_20261013101809_yjhx.xlsx"),
             "家电",
             &standard_headers(&APPLIANCE_TAIL),
             &[row],
@@ -1432,10 +1526,10 @@ mod tests {
         let dir = unique_temp_path("uploaded-refund-estimate-cap-digital");
         std::fs::create_dir_all(&dir).unwrap();
         write_refund_digital_fixture(&dir, &[]); // 无命中，走估算
-        let mut row = digital_row("UUID-J", "89813014812B06R", "ORDER-J");
+        let mut row = digital_row("UUID-J", "89813014812B04P", "ORDER-J");
         row[VALUE_COL_TRANSACTION_AMOUNT] = "10000.00"; // ×15%=1500.00，超过数码封顶500
         write_workbook(
-            &dir.join("MER_89813014812B06R_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813014812B04P_20261013101809_yjhx.xlsx"),
             "数码",
             &standard_headers(&DIGITAL_TAIL),
             &[row],
@@ -1455,10 +1549,10 @@ mod tests {
         let dir = unique_temp_path("uploaded-refund-estimate-missing-amount");
         std::fs::create_dir_all(&dir).unwrap();
         write_refund_appliance_fixture(&dir, &[]); // 无命中
-        let mut row = appliance_row("UUID-K", "89813015722APT1", "ORDER-K");
+        let mut row = appliance_row("UUID-K", "89813015722APTB", "ORDER-K");
         row[VALUE_COL_TRANSACTION_AMOUNT] = ""; // 交易金额缺失，无法估算
         write_workbook(
-            &dir.join("MER_89813015722APT1_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813015722APTB_20261013101809_yjhx.xlsx"),
             "家电",
             &standard_headers(&APPLIANCE_TAIL),
             &[row],
@@ -1476,10 +1570,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         write_refund_appliance_fixture(&dir, &[("NOMATCH-REF", "ORDER-A", "NOMATCH-INV", "88.88")]);
         write_workbook(
-            &dir.join("MER_89813015722APT1_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813015722APTB_20261013101809_yjhx.xlsx"),
             "家电",
             &standard_headers(&APPLIANCE_TAIL),
-            &[appliance_row("UUID-A", "89813015722APT1", "ORDER-A")],
+            &[appliance_row("UUID-A", "89813015722APTB", "ORDER-A")],
         );
 
         let table = UPLOADED_APPLIANCE.run(&dir).unwrap();
@@ -1501,10 +1595,10 @@ mod tests {
             &[("REF001", "NOMATCH-ORDER", "NOMATCH-INV", "12.34")],
         );
         write_workbook(
-            &dir.join("MER_89813015722APT1_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813015722APTB_20261013101809_yjhx.xlsx"),
             "家电",
             &standard_headers(&APPLIANCE_TAIL),
-            &[appliance_row("UUID-B", "89813015722APT1", "ORDER-B")],
+            &[appliance_row("UUID-B", "89813015722APTB", "ORDER-B")],
         );
 
         let table = UPLOADED_APPLIANCE.run(&dir).unwrap();
@@ -1525,10 +1619,10 @@ mod tests {
             &[("NOMATCH-REF", "NOMATCH-ORDER", "INV001", "56.70")],
         );
         write_workbook(
-            &dir.join("MER_89813015722APT1_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813015722APTB_20261013101809_yjhx.xlsx"),
             "家电",
             &standard_headers(&APPLIANCE_TAIL),
-            &[appliance_row("UUID-C", "89813015722APT1", "ORDER-C")],
+            &[appliance_row("UUID-C", "89813015722APTB", "ORDER-C")],
         );
 
         let table = UPLOADED_APPLIANCE.run(&dir).unwrap();
@@ -1553,10 +1647,10 @@ mod tests {
             ],
         );
         write_workbook(
-            &dir.join("MER_89813015722APT1_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813015722APTB_20261013101809_yjhx.xlsx"),
             "家电",
             &standard_headers(&APPLIANCE_TAIL),
-            &[appliance_row("UUID-D", "89813015722APT1", "ORDER-D")],
+            &[appliance_row("UUID-D", "89813015722APTB", "ORDER-D")],
         );
 
         let table = UPLOADED_APPLIANCE.run(&dir).unwrap();
@@ -1585,7 +1679,7 @@ mod tests {
                 "ORDER-E",
                 "TXN-1",
                 "企业甲",
-                "89813015722APT1",
+                "89813015722APTB",
                 "0.00",
                 "100.00",
                 "90.00",
@@ -1606,7 +1700,7 @@ mod tests {
                 "ORDER-E",
                 "TXN-2",
                 "企业甲",
-                "89813015722APT1",
+                "89813015722APTB",
                 "0.00",
                 "100.00",
                 "90.00",
@@ -1627,7 +1721,7 @@ mod tests {
                 "NOMATCH-ORDER",
                 "TXN-3",
                 "企业甲",
-                "89813015722APT1",
+                "89813015722APTB",
                 "0.00",
                 "100.00",
                 "90.00",
@@ -1653,10 +1747,10 @@ mod tests {
             .save(dir.join("2026年以旧换新补贴明细.xlsx"))
             .unwrap();
         write_workbook(
-            &dir.join("MER_89813015722APT1_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813015722APTB_20261013101809_yjhx.xlsx"),
             "家电",
             &standard_headers(&APPLIANCE_TAIL),
-            &[appliance_row("UUID-E", "89813015722APT1", "ORDER-E")],
+            &[appliance_row("UUID-E", "89813015722APTB", "ORDER-E")],
         );
 
         let table = UPLOADED_APPLIANCE.run(&dir).unwrap();
@@ -1681,10 +1775,10 @@ mod tests {
             ],
         );
         write_workbook(
-            &dir.join("MER_89813015722APT1_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813015722APTB_20261013101809_yjhx.xlsx"),
             "家电",
             &standard_headers(&APPLIANCE_TAIL),
-            &[appliance_row("UUID-F", "89813015722APT1", "ORDER-F")],
+            &[appliance_row("UUID-F", "89813015722APTB", "ORDER-F")],
         );
 
         let table = UPLOADED_APPLIANCE.run(&dir).unwrap();
@@ -1702,10 +1796,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         write_refund_digital_fixture(&dir, &[]);
         write_workbook(
-            &dir.join("MER_89813014812B1L3_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813014812B99Z_20261013101809_yjhx.xlsx"),
             "数码",
             &standard_headers(&DIGITAL_TAIL),
-            &[digital_row("UUID-1", "89813014812B1L3", "ORDER-1")],
+            &[digital_row("UUID-1", "89813014812B99Z", "ORDER-1")],
         );
 
         let error = UPLOADED_DIGITAL.run(&dir).unwrap_err();
@@ -1720,10 +1814,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         write_refund_digital_fixture(&dir, &[]);
         write_workbook(
-            &dir.join("MER_89813014812B06R_20260914101809_yjhx.xlsx"),
+            &dir.join("MER_89813014812B04P_20261013101809_yjhx.xlsx"),
             "数码",
             &standard_headers(&DIGITAL_TAIL),
-            &[digital_row("UUID-1", "89813015722APT1", "ORDER-1")],
+            &[digital_row("UUID-1", "89813015722APTB", "ORDER-1")],
         );
 
         let table = UPLOADED_DIGITAL.run(&dir).unwrap();
@@ -1738,7 +1832,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         write_refund_appliance_fixture(&dir, &[]);
 
-        let normal = appliance_row("UUID-AUTO", "89813015722APT1", "ORDER-AUTO");
+        let normal = appliance_row("UUID-AUTO", "89813015722APTB", "ORDER-AUTO");
         let mut row = vec![""; AUTONOMOUS_HEADERS.len()];
         row[..SHARED_FRONT_LEN].copy_from_slice(&normal[..SHARED_FRONT_LEN]);
         row[37] = "2026-09-15 13:00:00"; // 签收时间
@@ -1753,7 +1847,7 @@ mod tests {
         row[79] = "20260110";
         row[81] = "否";
         write_workbook(
-            &dir.join("MER_89813015722APT1_20260928132906_yjhx.xlsx"),
+            &dir.join("MER_89813015722APTB_20260928132906_yjhx.xlsx"),
             "自主品类",
             &AUTONOMOUS_HEADERS,
             &[row],
@@ -1776,7 +1870,7 @@ mod tests {
         let dir = unique_temp_path("uploaded-duplicate-headers");
         std::fs::create_dir(&dir).unwrap();
         write_refund_appliance_fixture(&dir, &[]);
-        let path = dir.join("MER_89813015722APT1_20260914101809_yjhx.xlsx");
+        let path = dir.join("MER_89813015722APTB_20261013101809_yjhx.xlsx");
         for duplicate in ["img5", "图片5", "图片1"] {
             let mut headers = standard_headers(&APPLIANCE_TAIL);
             headers.push(duplicate);
