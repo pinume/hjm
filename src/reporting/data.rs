@@ -61,6 +61,12 @@ impl ReportColumn {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum UploadGroup {
+    Appliance,
+    Digital,
+}
+
 pub(crate) struct SheetData {
     rows: Vec<Vec<Data>>,
     pub header: HeaderMap,
@@ -84,6 +90,45 @@ impl SheetData {
                     .find(aliases)
                     .ok_or_else(|| format!("{label}: 缺少必要列 [{field}]"))?;
                 Ok(ReportColumn::new(Some(source), field))
+            })
+            .collect()
+    }
+
+    /// 报表第5.4节：解释上传明细的重复图片列、别名及品类专属空列。
+    pub(crate) fn select_uploaded<'a>(
+        &self,
+        fields: impl IntoIterator<Item = &'a str>,
+        group: UploadGroup,
+    ) -> Result<Vec<ReportColumn>, String> {
+        let (label, absent): (&str, &[&str]) = match group {
+            UploadGroup::Appliance => ("已上传家电电脑.xlsx", &["IMEI1", "IMEI2"]),
+            UploadGroup::Digital => ("已上传数码.xlsx", &["EEG", "airConditionerKitInfo"]),
+        };
+        // Pre-resolve column mappings for Appliance and Digital
+        // Build output-column index extractor parameterized by category
+        let mut image_occurrence = 0;
+        fields
+            .into_iter()
+            .map(|field| {
+                if absent.contains(&field) {
+                    return Ok(ReportColumn::new(None, field));
+                }
+                let source = match field {
+                    "图片1" => {
+                        image_occurrence += 1;
+                        self.header.find_occurrence("图片1", image_occurrence)
+                    }
+                    "img5" => self.header.find(&["img5", "图片5"]),
+                    "img6" => self.header.find(&["img6", "图片6"]),
+                    "交旧品类" => self.header.find(&["交旧品类", "oldExchangeType"]),
+                    _ => self.header.find(&[field]),
+                }
+                .ok_or_else(|| format!("{label}: 缺少必要列 [{field}]"))?;
+                let mut column = ReportColumn::new(Some(source), field);
+                if field == "状态" {
+                    column.kind = CellKind::CenteredText;
+                }
+                Ok(column)
             })
             .collect()
     }
@@ -145,6 +190,95 @@ mod tests {
     use super::*;
     use crate::test_support::unique_temp_path;
     use std::cell::OnceCell;
+
+    #[test]
+    fn uploaded_projection_handles_duplicates_aliases_and_category_gaps() {
+        let rows = [
+            vec![
+                "图片1",
+                "图片1",
+                "图片5",
+                "图片6",
+                "oldExchangeType",
+                "IMEI1",
+                "EEG",
+                "airConditionerKitInfo",
+                "状态",
+            ],
+            vec![
+                "凭证图",
+                "组图",
+                "图五",
+                "图六",
+                "交旧值",
+                "imei",
+                "能效值",
+                "套机值",
+                "审核终止",
+            ],
+        ];
+        let table = SheetData::new(
+            rows.iter()
+                .map(|row| row.iter().map(|v| Data::String((*v).into())).collect())
+                .collect(),
+        );
+        // §5.4: occurrence order identifies the two 图片1 columns, independently of output positions.
+        let fields = [
+            "图片1",
+            "IMEI1",
+            "图片1",
+            "img5",
+            "img6",
+            "交旧品类",
+            "EEG",
+            "airConditionerKitInfo",
+            "状态",
+        ];
+        for (group, expected) in [
+            (
+                UploadGroup::Appliance,
+                [
+                    "凭证图",
+                    "",
+                    "组图",
+                    "图五",
+                    "图六",
+                    "交旧值",
+                    "能效值",
+                    "套机值",
+                    "审核终止",
+                ],
+            ),
+            (
+                UploadGroup::Digital,
+                [
+                    "凭证图",
+                    "imei",
+                    "组图",
+                    "图五",
+                    "图六",
+                    "交旧值",
+                    "",
+                    "",
+                    "审核终止",
+                ],
+            ),
+        ] {
+            let columns = table.select_uploaded(fields, group).unwrap();
+            let actual: Vec<_> = columns
+                .iter()
+                .map(|col| col.cell(&table[1]).to_string())
+                .collect();
+            assert_eq!(actual, expected);
+            assert!(matches!(columns[8].kind, CellKind::CenteredText));
+        }
+        let missing = SheetData::new(vec![vec![Data::String("图片1".into())]]);
+        let error = missing
+            .select_uploaded(["图片1", "图片1"], UploadGroup::Appliance)
+            .err()
+            .expect("second image column is required");
+        assert!(error.contains("已上传家电电脑.xlsx") && error.contains("图片1"));
+    }
 
     #[test]
     fn shared_inputs_are_loaded_once_and_preserve_upload_statuses() {

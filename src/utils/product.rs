@@ -15,6 +15,22 @@ struct CatalogProduct {
 }
 
 impl ProductIdentity {
+    /// Extract the brand and category from invoice names; keep the full cleaned name intact.
+    /// Unknown categories and names without a confirmed brand remain blank.
+    pub(crate) fn from_invoice_name(name: &str) -> ProductIdentity {
+        if let Some(identity) = ProductIdentity::from_invoice_catalog(name) {
+            return identity;
+        }
+        let Some((brand, remainder)) = name.split_once('-') else {
+            let category =
+                ProductIdentity::invoice_category_from_unseparated_name(name).unwrap_or_default();
+            return ProductIdentity::new(brand_from_unseparated_name(name), category);
+        };
+        let (category_token, _) = remainder.split_once('-').unwrap_or((remainder, ""));
+        let category = ProductIdentity::invoice_category(category_token).unwrap_or_default();
+        ProductIdentity::new(normalize_invoice_brand(brand), category)
+    }
+
     pub fn new(brand: impl Into<String>, category: impl Into<String>) -> Self {
         Self {
             brand: brand.into(),
@@ -33,28 +49,35 @@ impl ProductIdentity {
     /// 第10.11节：优先使用销售专用核实清单，再复用发票完整名称清单；未收录名称保留原归并。
     pub(crate) fn from_sales_product(name: &str, brand: &str, category: &str) -> Self {
         static CATALOG: OnceLock<HashMap<&str, CatalogProduct>> = OnceLock::new();
-        if let Some(product) = catalog_product(name, include_str!("sales_products.tsv"), &CATALOG) {
+        if let Some(product) = catalog_product(
+            name,
+            include_str!("sales_products.tsv"),
+            &CATALOG,
+            normalize_sales_brand,
+        ) {
             return product.identity.clone();
         }
-        let mut identity = Self::from_sales(brand, category);
         if let Some(product) = Self::invoice_catalog_product(name) {
             if product.non_product {
                 return ProductIdentity::new("", "");
             }
             let verified = &product.identity;
-            // 发票名称未确认的字段不能覆盖销售源表已有值；销售专用待确认项则显式留空。
-            if !verified.brand.is_empty() {
-                identity.brand = verified.brand.clone();
-            }
-            if !verified.category.is_empty() {
-                identity.category = verified.category.clone();
-            }
+            // 发票清单仅覆盖已确认的财务大类，不覆盖销售源表原始品牌标识
+            let final_category = if !verified.category.is_empty() {
+                verified.category.clone()
+            } else {
+                normalize_finance_category(category)
+            };
+            return ProductIdentity {
+                brand: normalize_sales_brand(brand),
+                category: final_category,
+            };
         }
-        identity
+        Self::from_sales(brand, category)
     }
 
     /// 第3.3节：将发票商品类别片段映射为财务大类。
-    pub(crate) fn invoice_category(token: &str) -> Option<&'static str> {
+    fn invoice_category(token: &str) -> Option<&'static str> {
         Some(match token {
             "国产手机" | "合资手机" | "手机" | "手机串号" | "平板" | "平板电脑" | "学习机"
             | "电话手表" | "手表" | "智能手表" | "手环" | "智能手环" | "智能眼镜" | "智能耳机" => {
@@ -129,7 +152,7 @@ impl ProductIdentity {
     }
 
     /// 第3.3节：无半角连字符名称仅按已确认的完整名称映射财务大类。
-    pub(crate) fn invoice_category_from_unseparated_name(name: &str) -> Option<&'static str> {
+    fn invoice_category_from_unseparated_name(name: &str) -> Option<&'static str> {
         match name {
             "OPPO手机"
             | "vivo手机"
@@ -218,20 +241,75 @@ impl ProductIdentity {
     }
 
     /// 第3.3节：已核对的完整发票商品名称精确匹配，未收录名称沿用原解析规则。
-    pub(crate) fn from_invoice_catalog(name: &str) -> Option<Self> {
+    fn from_invoice_catalog(name: &str) -> Option<Self> {
         Self::invoice_catalog_product(name).map(|product| product.identity.clone())
     }
 
     fn invoice_catalog_product(name: &str) -> Option<&'static CatalogProduct> {
         static CATALOG: OnceLock<HashMap<&str, CatalogProduct>> = OnceLock::new();
-        catalog_product(name, include_str!("invoice_products.tsv"), &CATALOG)
+        catalog_product(
+            name,
+            include_str!("invoice_products.tsv"),
+            &CATALOG,
+            normalize_invoice_brand,
+        )
     }
+}
+
+fn brand_from_unseparated_name(name: &str) -> String {
+    match name {
+        "VIXO手机" | "手机vivo" => return "vivo".to_string(),
+        "IQ手机" | "iQ手机" | "IQ00国产手机" => return "iqoo".to_string(),
+        "Reno手机" => return "OPPO".to_string(),
+        _ => {}
+    }
+    let lower_name = name.to_ascii_lowercase();
+    [
+        "OPPO",
+        "vivo",
+        "iqoo",
+        "HUAWEI",
+        "华为",
+        "荣耀",
+        "一加",
+        "小米",
+        "红米",
+        "苹果",
+        "小天才",
+        "学而思",
+        "作业帮",
+        "海尔",
+        "卡萨帝",
+        "美的",
+        "美菱",
+        "小天鹅",
+        "创维",
+        "TCL",
+        "海信",
+        "晶弘",
+        "奥克斯",
+        "格力",
+        "西门子",
+        "欧意",
+        "沁园",
+        "方太",
+        "长城",
+        "COLMO",
+        "统帅",
+        "步步高",
+        "老板",
+    ]
+    .into_iter()
+    .find(|brand| lower_name.starts_with(&brand.to_ascii_lowercase()))
+    .map(normalize_invoice_brand)
+    .unwrap_or_default()
 }
 
 fn catalog_product(
     name: &str,
     source: &'static str,
     cache: &'static OnceLock<HashMap<&'static str, CatalogProduct>>,
+    normalize_brand: fn(&str) -> String,
 ) -> Option<&'static CatalogProduct> {
     cache
         .get_or_init(|| {
@@ -247,7 +325,7 @@ fn catalog_product(
                         name,
                         CatalogProduct {
                             identity: ProductIdentity::new(
-                                normalize_invoice_brand(brand),
+                                normalize_brand(brand),
                                 normalize_finance_category(category),
                             ),
                             non_product: fields.nth(1) == Some("非商品费用"),
@@ -272,7 +350,7 @@ pub fn normalize_sales_brand(value: &str) -> String {
 }
 
 /// 发票品牌归并：处理特殊品牌大小写/子类，并回退到销售用券标准归并。
-pub fn normalize_invoice_brand(brand: &str) -> String {
+fn normalize_invoice_brand(brand: &str) -> String {
     let brand = brand.split(['(', '（']).next().unwrap_or(brand).trim();
     match brand.to_ascii_lowercase().as_str() {
         "vivo" => "vivo".to_string(),
@@ -298,9 +376,78 @@ mod tests {
     use super::*;
 
     #[test]
+    fn newly_named_mobile_products_use_the_confirmed_digital_category() {
+        for category in [
+            "手机",
+            "手机串号",
+            "平板",
+            "平板电脑",
+            "智能手环",
+            "手表",
+            "智能眼镜",
+            "智能耳机",
+        ] {
+            // 第3.3节：新增型号不在精确名称表中时，仍按用户确认的类别归数码。
+            let name = format!("华为-{category}-新增型号");
+            assert_eq!(
+                ProductIdentity::from_invoice_name(&name),
+                ProductIdentity::new("华为", "数码")
+            );
+        }
+        assert_eq!(
+            ProductIdentity::from_invoice_name("华为-未核实新类别-新增型号"),
+            ProductIdentity::new("华为", "")
+        );
+        assert_eq!(
+            ProductIdentity::from_invoice_name("联想-电脑-新增型号"),
+            ProductIdentity::new("联想", "电脑")
+        );
+        assert_eq!(
+            ProductIdentity::from_invoice_name("VIVO(步步高)-手机-新增型号"),
+            ProductIdentity::new("vivo", "数码")
+        );
+        assert_eq!(
+            ProductIdentity::from_invoice_name("OPPO（本德）-平板电脑-新增型号"),
+            ProductIdentity::new("OPPO", "数码")
+        );
+        assert_eq!(
+            ProductIdentity::from_invoice_name("华为（移动）-电脑-新增型号"),
+            ProductIdentity::new("华为", "电脑")
+        );
+    }
+
+    #[test]
     fn invoice_catalog_has_unique_names_and_valid_categories() {
         let mut names = std::collections::HashSet::new();
         for line in include_str!("invoice_products.tsv").lines().skip(1) {
+            let fields: Vec<_> = line.split('\t').collect();
+            assert_eq!(fields.len(), 6, "{line}");
+            assert!(!fields[0].is_empty());
+            assert!(names.insert(fields[0]), "重复商品名称：{}", fields[0]);
+            assert!(
+                [
+                    "",
+                    "数码",
+                    "电脑",
+                    "空调",
+                    "冰箱",
+                    "洗衣机",
+                    "厨卫",
+                    "彩电",
+                    "小电",
+                    "其他"
+                ]
+                .contains(&fields[1]),
+                "{line}"
+            );
+        }
+        assert!(!names.is_empty());
+    }
+
+    #[test]
+    fn sales_catalog_has_unique_names_and_valid_categories() {
+        let mut names = std::collections::HashSet::new();
+        for line in include_str!("sales_products.tsv").lines().skip(1) {
             let fields: Vec<_> = line.split('\t').collect();
             assert_eq!(fields.len(), 6, "{line}");
             assert!(!fields[0].is_empty());
@@ -429,16 +576,9 @@ mod tests {
     #[test]
     fn verified_sales_names_override_wrong_source_fields_without_guessing() {
         for (name, brand, category) in [
-            ("TCL-智能锁-S11SE", "TCL", "小电"),
-            (
-                "联想-电脑新-联想小新Pro16C-Ultra5-225H-32g-1T-B",
-                "联想",
-                "电脑",
-            ),
-            ("联想-电脑周边新-联想小新Pro13-8+256-B", "联想", "数码"),
             (
                 "小米（直营店）-生态链-米家冰箱 十字439L 超薄平嵌 白",
-                "小米",
+                "小米（直营店）",
                 "冰箱",
             ),
             (
@@ -454,6 +594,51 @@ mod tests {
                 ProductIdentity::new(brand, category)
             );
         }
+        // 发票核实清单仅覆盖财务大类，不覆盖销售源表原始品牌标识
+        assert_eq!(
+            ProductIdentity::from_sales_product("TCL-智能锁-S11SE", "TCL", "国产彩电"),
+            ProductIdentity::new("TCL", "小电")
+        );
+        assert_eq!(
+            ProductIdentity::from_sales_product(
+                "联想-电脑新-联想小新Pro16C-Ultra5-225H-32g-1T-B",
+                "联想",
+                "新业务类"
+            ),
+            ProductIdentity::new("联想", "电脑")
+        );
+        assert_eq!(
+            ProductIdentity::from_sales_product(
+                "联想-电脑周边新-联想小新Pro13-8+256-B",
+                "联想",
+                "错大类"
+            ),
+            ProductIdentity::new("联想", "数码")
+        );
+        assert_eq!(
+            ProductIdentity::from_sales_product(
+                "VIVO(步步高)-平板电脑-vivo Pad SE 8GB+256GB 蓝色",
+                "VIVO(步步高)",
+                "新业务类"
+            ),
+            ProductIdentity::new("VIVO(步步高)", "数码")
+        );
+        assert_eq!(
+            ProductIdentity::from_sales_product(
+                "华为(盛腾)-手机-nova 15 12GB+256GB 幻夜黑 双卡 全网通版",
+                "华为(盛腾)",
+                "新业务类"
+            ),
+            ProductIdentity::new("华为(盛腾)", "数码")
+        );
+        assert_eq!(
+            ProductIdentity::from_sales_product(
+                "华为(F)-手机-HUAWEI Mate 80 12GB+512GB 曜石黑 双卡 全网通版",
+                "华为(F)",
+                "新业务类"
+            ),
+            ProductIdentity::new("华为(F)", "数码")
+        );
         assert_eq!(
             ProductIdentity::from_sales_product("空调", "华凌", "空调"),
             ProductIdentity::new("美的", "空调")

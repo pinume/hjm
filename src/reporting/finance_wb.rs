@@ -1,10 +1,12 @@
 use rust_xlsxwriter::Workbook;
 use std::path::Path;
 
-use super::data::{CellKind, CommonInputs, ReportColumn, SheetData};
+use super::data::{CommonInputs, ReportColumn, SheetData, UploadGroup};
 use super::excel::ReportSheetBuilder;
-use super::reader::{HeaderMap, cell_to_string};
-use super::reconciler::TransactionReconciler;
+#[cfg(test)]
+use super::reader::HeaderMap;
+use super::reader::cell_to_string;
+use super::reconciler::{ReconciledTransaction, TransactionReconciler};
 use super::styles::StylePool;
 
 /// Generate Workbook 2: 26年国补门店财务统筹表.xlsx (4 Sheets)
@@ -63,6 +65,27 @@ pub(crate) fn generate_with_inputs(
         .map_err(|e| format!("保存工作簿二失败: {}", e))?;
 
     Ok(warnings)
+}
+
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+struct FinalMatchUnmatched {
+    unsubmitted: usize,
+    empty_invoice: usize,
+    incomplete_product: usize,
+}
+
+impl FinalMatchUnmatched {
+    fn observe(&mut self, rec: &ReconciledTransaction<'_>) {
+        self.unsubmitted += usize::from(rec.status == "未提交");
+        self.empty_invoice += usize::from(rec.invoice_no.is_empty());
+        self.incomplete_product += usize::from(
+            rec.category().is_empty() || rec.brand().is_empty() || rec.model().is_empty(),
+        );
+    }
+
+    fn has_any(&self) -> bool {
+        self.unsubmitted > 0 || self.empty_invoice > 0 || self.incomplete_product > 0
+    }
 }
 
 fn build_final_match_sheet(
@@ -128,65 +151,24 @@ fn build_final_match_sheet(
 
     let resolved_store_cols =
         store_occ.select(headers[1..21].iter().copied(), "银联交易明细门店.xlsx")?;
+    let mut unmatched = FinalMatchUnmatched::default();
 
     for (r_idx, row) in store_occ.iter().enumerate().skip(1) {
-        let cur_row = r_idx as u32; // Row 1 is header, data starts at row 1
-        sheet
-            .ws
-            .set_row_height(cur_row, 22.0)
-            .map_err(|e| e.to_string())?;
-
-        // Col 0: 序号 (1-based)
-        sheet
-            .ws
-            .write_number_with_format(cur_row, 0, r_idx as f64, &s.int_count)
-            .map_err(|e| e.to_string())?;
-
-        // Col 1-20: Pre-resolved from store occurrence
-        for (index, column) in resolved_store_cols.iter().enumerate() {
-            column
-                .kind
-                .write(sheet.ws, s, cur_row, index as u16 + 1, column.cell(row))?;
-        }
-
         let ref_num = cell_to_string(&row[s_ref_idx]);
         let remark = cell_to_string(&row[s_rem_idx]);
         let rec = reconciler.reconcile(&ref_num, &remark);
-
-        // Col 21, 22, 23: prefer complete, unique sales products; fall back to invoices as a group.
-        sheet
-            .ws
-            .write_string_with_format(cur_row, 21, rec.category(), &s.text_center)
-            .map_err(|e| e.to_string())?;
-        sheet
-            .ws
-            .write_string_with_format(cur_row, 22, rec.brand(), &s.text_left)
-            .map_err(|e| e.to_string())?;
-        sheet
-            .ws
-            .write_string_with_format(cur_row, 23, rec.model(), &s.text_left)
-            .map_err(|e| e.to_string())?;
-
-        // Col 24: 状态
-        sheet
-            .ws
-            .write_string_with_format(cur_row, 24, rec.status, &s.text_center)
-            .map_err(|e| e.to_string())?;
-
-        // Col 25: 发票号
-        sheet
-            .ws
-            .write_string_with_format(cur_row, 25, rec.invoice_no, &s.text_left)
-            .map_err(|e| e.to_string())?;
-
-        // Col 26: 发票是否红冲
-        sheet
-            .ws
-            .write_string_with_format(cur_row, 26, rec.red_flush_text(), &s.text_center)
-            .map_err(|e| e.to_string())?;
+        unmatched.observe(&rec);
+        sheet.write_final_match_row(r_idx, row, &resolved_store_cols, &rec)?;
     }
 
-    Ok(reconciler.warnings())
+    let mut warnings = reconciler.warnings();
+    if unmatched.has_any() {
+        warnings.push(format!(
+            "最终匹配表：未提交 {} 条，发票号为空 {} 条，商品信息不完整 {} 条（各项可重叠）。",
+            unmatched.unsubmitted, unmatched.empty_invoice, unmatched.incomplete_product
+        ));
+    }
+    Ok(warnings)
 }
 
 fn build_store_occurrence_sheet(
@@ -356,40 +338,8 @@ fn build_store_upload_sheet(
         [4, 7, 8, 10, 11, 12, 17, 24, 42, 47, 48, 49, 50, 51, 57, 59].contains(&col)
     })?;
 
-    // Pre-resolve column mappings for Appliance and Digital
-    let app_h = &app_up.header;
-    let dig_h = &dig_up.header;
-
-    // Build output-column index extractor parameterized by category
-    let resolve_indices =
-        |h: &HeaderMap, is_dig: bool, label: &str| -> Result<Vec<ReportColumn>, String> {
-            (0..col_defs.len())
-                .map(|col| {
-                    let optional =
-                        (!is_dig && matches!(col, 25 | 26)) || (is_dig && matches!(col, 44 | 58));
-                    if optional {
-                        return Ok(ReportColumn::new(None, col_defs[col].0));
-                    }
-                    let index = match col {
-                        22 => h.find_occurrence("图片1", 1),
-                        27 => h.find_occurrence("图片1", 2),
-                        31 => h.find(&["img5", "图片5"]),
-                        32 => h.find(&["img6", "图片6"]),
-                        56 => h.find(&["交旧品类", "oldExchangeType"]),
-                        _ => h.find(&[col_defs[col].0]),
-                    }
-                    .ok_or_else(|| format!("{}: 缺少必要列 [{}]", label, col_defs[col].0))?;
-                    let mut column = ReportColumn::new(Some(index), col_defs[col].0);
-                    if col_defs[col].0 == "状态" {
-                        column.kind = CellKind::CenteredText;
-                    }
-                    Ok(column)
-                })
-                .collect()
-        };
-
-    let app_map = resolve_indices(app_h, false, "已上传家电电脑.xlsx")?;
-    let dig_map = resolve_indices(dig_h, true, "已上传数码.xlsx")?;
+    let app_map = app_up.select_uploaded(header_strs.iter().copied(), UploadGroup::Appliance)?;
+    let dig_map = dig_up.select_uploaded(header_strs.iter().copied(), UploadGroup::Digital)?;
 
     for row in &app_up[1..] {
         sheet.write_row(row, &app_map)?;

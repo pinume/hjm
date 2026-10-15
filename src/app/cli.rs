@@ -7,6 +7,10 @@ use super::runner;
 
 /// 程序入口：读取源文件夹路径后执行全部类别一次，处理完成即退出。
 pub fn run() -> Result<bool, ProcessError> {
+    println!("==================================================");
+    println!("   HJM (哈基米) - 国补门店财务统筹与清洗系统");
+    println!("==================================================");
+
     let Some(input_dir) = read_input_dir()? else {
         return Ok(true);
     };

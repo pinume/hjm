@@ -146,11 +146,7 @@ pub fn cell_to_string(cell: &Data) -> String {
         Data::Empty => String::new(),
         Data::String(s) => s.trim().to_string(),
         Data::Float(f) => {
-            if f.fract() == 0.0 && *f >= i64::MIN as f64 && *f <= i64::MAX as f64 {
-                format!("{}", *f as i64)
-            } else {
-                format!("{}", f)
-            }
+            crate::utils::text::identifier_from_float(*f).unwrap_or_else(|| format!("{f}"))
         }
         Data::Int(i) => format!("{}", i),
         Data::Bool(b) => format!("{}", b),
@@ -338,11 +334,4 @@ pub fn get_colored_row_indices_multi(
     }
 
     Ok(result_map)
-}
-
-/// Extract 1-indexed row numbers that have cell fill color matching `target_hex`
-pub fn get_colored_row_indices(path: &Path, target_hex: &str) -> Result<HashSet<u32>, String> {
-    let clean = target_hex.trim_start_matches('#').to_uppercase();
-    let mut map = get_colored_row_indices_multi(path, &[target_hex])?;
-    Ok(map.remove(&clean).unwrap_or_default())
 }

@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::ops::Index;
 
 /// 候选值优先判定结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,15 +24,15 @@ impl PriorityOutcome {
         }
     }
 
-    /// 解包为唯一值；若是歧义则累加计数器并返回 None；若是无命中返回 None。
-    pub(crate) fn into_unique(self, ambiguous_counter: &mut usize) -> Option<String> {
+    pub(crate) fn is_ambiguous(&self) -> bool {
+        matches!(self, Self::Ambiguous)
+    }
+
+    /// 解包为唯一值；歧义或无命中时返回 None，不修改调用者的统计。
+    pub(crate) fn into_unique(self) -> Option<String> {
         match self {
             Self::Unique(value) => Some(value),
-            Self::Ambiguous => {
-                *ambiguous_counter += 1;
-                None
-            }
-            Self::NoHit => None,
+            Self::Ambiguous | Self::NoHit => None,
         }
     }
 }
@@ -48,9 +47,7 @@ pub(crate) struct MultiValueIndex {
 
 impl MultiValueIndex {
     pub(crate) fn new() -> Self {
-        Self {
-            map: HashMap::new(),
-        }
+        Self::default()
     }
 
     pub(crate) fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
@@ -83,14 +80,6 @@ impl MultiValueIndex {
     }
 }
 
-impl Index<&str> for MultiValueIndex {
-    type Output = [String];
-
-    fn index(&self, key: &str) -> &Self::Output {
-        self.map.get(key).map(|v| v.as_slice()).unwrap_or(&[])
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,19 +105,15 @@ mod tests {
     }
 
     #[test]
-    fn into_unique_accumulates_ambiguous_counter() {
-        let mut count = 0;
+    fn unique_value_and_ambiguity_are_independent_results() {
         assert_eq!(
-            PriorityOutcome::Unique("OK".into()).into_unique(&mut count),
+            PriorityOutcome::Unique("OK".into()).into_unique(),
             Some("OK".into())
         );
-        assert_eq!(count, 0);
-
-        assert_eq!(PriorityOutcome::Ambiguous.into_unique(&mut count), None);
-        assert_eq!(count, 1);
-
-        assert_eq!(PriorityOutcome::NoHit.into_unique(&mut count), None);
-        assert_eq!(count, 1);
+        assert!(PriorityOutcome::Ambiguous.is_ambiguous());
+        assert_eq!(PriorityOutcome::Ambiguous.into_unique(), None);
+        assert!(!PriorityOutcome::NoHit.is_ambiguous());
+        assert_eq!(PriorityOutcome::NoHit.into_unique(), None);
     }
 
     #[test]
@@ -161,7 +146,5 @@ mod tests {
             Some(&["INV1".to_string(), "INV1".to_string()][..])
         );
         assert_eq!(index.get("NONE"), None);
-        assert_eq!(index["DOC1"], ["INV1".to_string(), "INV1".to_string()]);
-        assert!(index["NONE"].is_empty());
     }
 }

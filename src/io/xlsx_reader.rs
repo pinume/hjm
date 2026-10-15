@@ -110,11 +110,20 @@ impl SheetGrid {
 
 /// 打开工作簿并按原顺序返回全部工作表。
 pub fn open_sheets(path: &Path) -> Result<Vec<SheetGrid>, ProcessError> {
+    open_sheets_matching(path, |_| true)
+}
+
+/// 在读取单元格前筛选工作表；所选工作表仍按源顺序读取，读取失败即报错。
+pub(crate) fn open_sheets_matching(
+    path: &Path,
+    include: impl Fn(&str) -> bool,
+) -> Result<Vec<SheetGrid>, ProcessError> {
     let mut workbook: Xlsx<_> = open_workbook(path)
         .map_err(|error| ProcessError::Read(format!("{}：{error}", path.display())))?;
     workbook
         .sheet_names()
         .into_iter()
+        .filter(|name| include(name))
         .map(|name| {
             let range = workbook.worksheet_range(&name).map_err(|error| {
                 ProcessError::Read(format!("{} / {name}：{error}", path.display()))
@@ -127,6 +136,48 @@ pub fn open_sheets(path: &Path) -> Result<Vec<SheetGrid>, ProcessError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn excluded_sheet_is_not_parsed_and_selected_errors_still_propagate() {
+        use std::io::{Cursor, Read, Write};
+
+        let mut book = rust_xlsxwriter::Workbook::new();
+        book.add_worksheet()
+            .set_name("明细")
+            .unwrap()
+            .write_string(0, 0, "有效")
+            .unwrap();
+        book.add_worksheet()
+            .set_name("汇总")
+            .unwrap()
+            .write_string(0, 0, "忽略")
+            .unwrap();
+        let mut archive =
+            zip::ZipArchive::new(Cursor::new(book.save_to_buffer().unwrap())).unwrap();
+        let mut damaged = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).unwrap();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            if entry.name() == "xl/worksheets/sheet2.xml" {
+                bytes = b"<worksheet><sheetData><row></worksheet>".to_vec();
+            }
+            damaged
+                .start_file(entry.name(), zip::write::SimpleFileOptions::default())
+                .unwrap();
+            damaged.write_all(&bytes).unwrap();
+        }
+        let path = crate::test_support::unique_temp_path("excluded-sheet").with_extension("xlsx");
+        std::fs::write(&path, damaged.finish().unwrap().into_inner()).unwrap();
+        let selected = open_sheets_matching(&path, |name| name != "汇总").unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].cell(1, 1), RawCell::Text("有效".into()));
+        let error = open_sheets(&path)
+            .err()
+            .expect("selected corrupt sheet must fail");
+        assert!(error.to_string().contains("汇总"));
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn standard_epoch_serials_are_unchanged() {

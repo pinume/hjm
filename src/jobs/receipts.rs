@@ -104,10 +104,6 @@ impl Job for ReceiptsJob {
         "收款单统计"
     }
 
-    fn output_stem(&self) -> &'static str {
-        "收款单统计"
-    }
-
     fn run_in_context(
         &self,
         input_dir: &Path,
@@ -261,32 +257,17 @@ fn compute_remarks(records: &mut [ReceiptRecord]) {
 }
 
 fn output_columns() -> Vec<Column> {
-    vec![
-        Column {
-            name: "日期",
-            ty: ColumnType::Date,
-        },
-        Column {
-            name: "单据号",
-            ty: ColumnType::Text,
-        },
-        Column {
-            name: "商品名称",
-            ty: ColumnType::Text,
-        },
-        Column {
-            name: "原票号",
-            ty: ColumnType::Text,
-        },
-        Column {
-            name: "匹配单据号",
-            ty: ColumnType::Text,
-        },
-        Column {
-            name: "备注",
-            ty: ColumnType::Text,
-        },
+    [
+        ("日期", ColumnType::Date),
+        ("单据号", ColumnType::Text),
+        ("商品名称", ColumnType::Text),
+        ("原票号", ColumnType::Text),
+        ("匹配单据号", ColumnType::Text),
+        ("备注", ColumnType::Text),
     ]
+    .into_iter()
+    .map(|(name, ty)| Column { name, ty })
+    .collect()
 }
 
 fn to_row(record: ReceiptRecord) -> Row {

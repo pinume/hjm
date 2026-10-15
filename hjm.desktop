@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=HJM (哈基米)
+GenericName=国补门店财务统筹与清洗系统
+Comment=国补门店财务统筹、数据清洗与对账系统
+Exec=hjm
+Icon=docs/assets/hjm_icon.jpg
+Terminal=true
+Categories=Office;Finance;Utility;

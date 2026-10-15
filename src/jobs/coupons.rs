@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
@@ -11,9 +12,10 @@ use crate::io::xlsx_reader::{RawCell, SheetGrid, open_sheets};
 use crate::model::{Column, ColumnType, Fill, ProcessError, Row, Table, Value};
 use crate::utils::{numbers, text};
 
-use super::uploaded;
+use super::match_stats::{MatchAmbiguities, MatchOutcome, RecordMatch};
+use super::uploaded::{UploadedStatusIndex, UploadedStatusMatch};
 use super::{
-    Category, Job, MatchStats, MultiValueIndex, PipelineContext, PriorityOutcome,
+    Category, Job, MatchStats, MultiValueIndex, PipelineContext, PriorityOutcome, SubsidyGroup,
     build_match_doc_no, cell_text, data_error, parse_date_field, text_value,
 };
 #[cfg(test)]
@@ -84,10 +86,6 @@ impl Job for CouponsJob {
         "销售用券情况统计"
     }
 
-    fn output_stem(&self) -> &'static str {
-        "销售用券情况统计"
-    }
-
     fn run_in_context(
         &self,
         input_dir: &Path,
@@ -111,10 +109,8 @@ impl Job for CouponsJob {
         let receipts_index = ctx.receipts_index(input_dir)?;
         // 备注兜底：缺失或结构异常时同样必须停止，直接复用已上传家电电脑/已上传数码
         // 两个 Job 各自的全部校验（文件发现、表头、第26列起字段解析）。
-        let appliance =
-            uploaded::status_indices_in_context(input_dir, &uploaded::UPLOADED_APPLIANCE, ctx)?;
-        let digital =
-            uploaded::status_indices_in_context(input_dir, &uploaded::UPLOADED_DIGITAL, ctx)?;
+        let appliance = ctx.uploaded_status_index(SubsidyGroup::Appliance, input_dir)?;
+        let digital = ctx.uploaded_status_index(SubsidyGroup::Digital, input_dir)?;
 
         let mut records = Vec::new();
         for row in 3..last_row {
@@ -262,10 +258,8 @@ pub(crate) struct SalesCouponReconciler<'a> {
     authority: &'a HashSet<String>,
     invoice_index: &'a MultiValueIndex,
     receipts_index: &'a MultiValueIndex,
-    appliance_ref: &'a HashMap<String, String>,
-    appliance_inv: &'a MultiValueIndex,
-    digital_ref: &'a HashMap<String, String>,
-    digital_inv: &'a MultiValueIndex,
+    appliance: &'a UploadedStatusIndex,
+    digital: &'a UploadedStatusIndex,
     stats: MatchStats,
 }
 
@@ -274,37 +268,15 @@ impl<'a> SalesCouponReconciler<'a> {
         authority: &'a HashSet<String>,
         invoice_index: &'a MultiValueIndex,
         receipts_index: &'a MultiValueIndex,
-        appliance: &'a (HashMap<String, String>, MultiValueIndex),
-        digital: &'a (HashMap<String, String>, MultiValueIndex),
-    ) -> Self {
-        Self::from_parts(
-            authority,
-            invoice_index,
-            receipts_index,
-            &appliance.0,
-            &appliance.1,
-            &digital.0,
-            &digital.1,
-        )
-    }
-
-    pub(crate) fn from_parts(
-        authority: &'a HashSet<String>,
-        invoice_index: &'a MultiValueIndex,
-        receipts_index: &'a MultiValueIndex,
-        appliance_ref: &'a HashMap<String, String>,
-        appliance_inv: &'a MultiValueIndex,
-        digital_ref: &'a HashMap<String, String>,
-        digital_inv: &'a MultiValueIndex,
+        appliance: &'a UploadedStatusIndex,
+        digital: &'a UploadedStatusIndex,
     ) -> Self {
         Self {
             authority,
             invoice_index,
             receipts_index,
-            appliance_ref,
-            appliance_inv,
-            digital_ref,
-            digital_inv,
+            appliance,
+            digital,
             stats: MatchStats::default(),
         }
     }
@@ -312,16 +284,18 @@ impl<'a> SalesCouponReconciler<'a> {
     pub(crate) fn reconcile_record(&mut self, record: CouponRecord) -> Row {
         let quantity = quantity_of(record.subsidy);
         let match_doc_no = build_match_doc_no(&record.doc_date, &record.doc_no);
-        let reference = reference_outcome(&record.summary, self.authority)
-            .into_unique(&mut self.stats.ambiguous[0]);
-        let invoice_no = self
-            .invoice_index
-            .resolve(Some(&match_doc_no))
-            .into_unique(&mut self.stats.ambiguous[1]);
-        let receipts_hit = self
-            .receipts_index
-            .resolve(Some(&match_doc_no))
-            .into_unique(&mut self.stats.ambiguous[2]);
+        let reference_result = reference_outcome(&record.summary, self.authority);
+        let invoice_result = self.invoice_index.resolve(Some(&match_doc_no));
+        let receipts_result = self.receipts_index.resolve(Some(&match_doc_no));
+        let mut ambiguous = MatchAmbiguities {
+            reference: reference_result.is_ambiguous(),
+            invoice: invoice_result.is_ambiguous(),
+            receipts: receipts_result.is_ambiguous(),
+            uploaded: false,
+        };
+        let reference = reference_result.into_unique();
+        let invoice_no = invoice_result.into_unique();
+        let receipts_hit = receipts_result.into_unique();
         let fill = receipts_hit.is_some().then_some(Fill::Pink);
 
         let identity = crate::utils::product::ProductIdentity::from_sales_product(
@@ -329,29 +303,36 @@ impl<'a> SalesCouponReconciler<'a> {
             &record.brand,
             &record.finance_category,
         );
-        let (uploaded_by_ref, uploaded_by_inv) = if identity.category == "数码" {
-            (self.digital_ref, self.digital_inv)
+        let uploaded = if identity.category == "数码" {
+            self.digital
         } else {
-            (self.appliance_ref, self.appliance_inv)
+            self.appliance
         };
 
-        let remark = if let Some(value) = receipts_hit {
-            self.stats.hits[0] += 1;
-            Some(value)
-        } else if let Some(status) = reference
-            .as_ref()
-            .and_then(|key| uploaded_by_ref.get(key))
-            .filter(|status| !status.is_empty())
-        {
-            self.stats.hits[1] += 1;
-            Some(status.clone())
-        } else {
-            let value = uploaded_by_inv
-                .resolve(invoice_no.as_deref())
-                .into_unique(&mut self.stats.ambiguous[3]);
-            self.stats.hits[if value.is_some() { 2 } else { 3 }] += 1;
-            value
+        let mut outcome = MatchOutcome::Unuploaded {
+            has_keys: reference.is_some() || invoice_no.is_some(),
         };
+        let remark = if let Some(value) = receipts_hit {
+            outcome = MatchOutcome::Receipts;
+            Some(value)
+        } else {
+            match uploaded.resolve(reference.as_deref(), invoice_no.as_deref()) {
+                UploadedStatusMatch::Reference(status) => {
+                    outcome = MatchOutcome::UploadedReference;
+                    Some(status)
+                }
+                UploadedStatusMatch::Invoice(status) => {
+                    outcome = MatchOutcome::UploadedInvoice;
+                    Some(status)
+                }
+                UploadedStatusMatch::Ambiguous => {
+                    ambiguous.uploaded = true;
+                    None
+                }
+                UploadedStatusMatch::NoHit => None,
+            }
+        };
+        self.stats.record(RecordMatch { outcome, ambiguous });
 
         // 10.12.3 节：两阶段均未命中（含歧义、空键）时，备注固定填“未上传”，不沉底不填色；
         // 空值从不参与前两阶段的匹配，这里只是给最终仍为空的结果一个统一的文本标记。
@@ -387,7 +368,8 @@ impl<'a> SalesCouponReconciler<'a> {
             rows.into_iter().partition(|r| r.fill != Some(Fill::Pink));
         top.extend(bottom);
 
-        assert_eq!(self.stats.hits.iter().sum::<usize>(), top.len());
+        assert_eq!(self.stats.hits.total(), top.len());
+        assert_eq!(self.stats.unuploaded.total(), self.stats.hits.unuploaded);
         Table {
             columns: output_columns(),
             rows: top,
@@ -405,20 +387,16 @@ fn to_row(
     authority: &HashSet<String>,
     invoice_index: &MultiValueIndex,
     receipts_index: &MultiValueIndex,
-    uploaded_by_reference: &HashMap<String, String>,
-    uploaded_by_invoice_no: &MultiValueIndex,
+    appliance: &UploadedStatusIndex,
     stats: &mut MatchStats,
 ) -> Row {
-    let empty_map = HashMap::new();
-    let empty_index = MultiValueIndex::new();
-    let mut reconciler = SalesCouponReconciler::from_parts(
+    let digital = UploadedStatusIndex::default();
+    let mut reconciler = SalesCouponReconciler::new(
         authority,
         invoice_index,
         receipts_index,
-        uploaded_by_reference,
-        uploaded_by_invoice_no,
-        &empty_map,
-        &empty_index,
+        appliance,
+        &digital,
     );
     reconciler.stats = *stats;
     let row = reconciler.reconcile_record(record);
@@ -427,52 +405,25 @@ fn to_row(
 }
 
 fn output_columns() -> Vec<Column> {
-    vec![
-        Column {
-            name: "单据号",
-            ty: ColumnType::Text,
-        },
-        Column {
-            name: "单据日期",
-            ty: ColumnType::Date,
-        },
-        Column {
-            name: "商品名称",
-            ty: ColumnType::Text,
-        },
-        Column {
-            name: "品牌",
-            ty: ColumnType::Text,
-        },
-        Column {
-            name: "财务大类",
-            ty: ColumnType::Text,
-        },
-        Column {
-            name: "补贴额",
-            ty: ColumnType::Decimal(crate::model::DecimalScale::Two),
-        },
-        Column {
-            name: "数量",
-            ty: ColumnType::Integer,
-        },
-        Column {
-            name: "参考号",
-            ty: ColumnType::Text,
-        },
-        Column {
-            name: "数电发票号码",
-            ty: ColumnType::Text,
-        },
-        Column {
-            name: "匹配单据号",
-            ty: ColumnType::Text,
-        },
-        Column {
-            name: "备注",
-            ty: ColumnType::Text,
-        },
+    [
+        ("单据号", ColumnType::Text),
+        ("单据日期", ColumnType::Date),
+        ("商品名称", ColumnType::Text),
+        ("品牌", ColumnType::Text),
+        ("财务大类", ColumnType::Text),
+        (
+            "补贴额",
+            ColumnType::Decimal(crate::model::DecimalScale::Two),
+        ),
+        ("数量", ColumnType::Integer),
+        ("参考号", ColumnType::Text),
+        ("数电发票号码", ColumnType::Text),
+        ("匹配单据号", ColumnType::Text),
+        ("备注", ColumnType::Text),
     ]
+    .into_iter()
+    .map(|(name, ty)| Column { name, ty })
+    .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -481,7 +432,7 @@ fn output_columns() -> Vec<Column> {
 
 #[cfg(test)]
 fn extract_reference(summary: &str, authority: &HashSet<String>) -> Option<String> {
-    reference_outcome(summary, authority).into_unique(&mut 0)
+    reference_outcome(summary, authority).into_unique()
 }
 
 fn reference_outcome(summary: &str, authority: &HashSet<String>) -> PriorityOutcome {
@@ -536,6 +487,7 @@ fn maximal_digit_runs(text: &str) -> Vec<(usize, usize)> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::match_stats::{AmbiguityCounts, MatchHits, UnuploadedBreakdown};
     use rust_xlsxwriter::Workbook;
 
     use super::*;
@@ -1610,54 +1562,106 @@ mod tests {
         let dir = unique_temp_path("coupons-uploaded-cache");
         std::fs::create_dir(&dir).unwrap();
         write_empty_uploaded_fixtures(&dir);
-        for (merchant, tail) in [
-            (MERCHANT_APPLIANCE, &uploaded::APPLIANCE_TAIL[..]),
-            (MERCHANT_DIGITAL, &uploaded::DIGITAL_TAIL[..]),
-        ] {
+        for group in [SubsidyGroup::Appliance, SubsidyGroup::Digital] {
+            let (merchant, tail, status) = match group {
+                SubsidyGroup::Appliance => (
+                    MERCHANT_APPLIANCE,
+                    &uploaded::APPLIANCE_TAIL[..],
+                    "审核失败",
+                ),
+                SubsidyGroup::Digital => (MERCHANT_DIGITAL, &uploaded::DIGITAL_TAIL[..], "待审核"),
+            };
             write_uploaded_fixture(
                 &dir,
                 merchant,
                 tail,
                 &[
                     ("u1", "ref", "审核通过", "inv"),
-                    ("u2", "ref", "审核失败", "inv"),
+                    ("u2", "ref", status, "inv"),
                     ("u3", "", "待审核", ""),
                     ("u4", "ignored", "", "ignored"),
                 ],
             );
         }
-        let mut ctx = super::super::PipelineContext::new();
-        let expected =
-            uploaded::status_indices_in_context(&dir, &uploaded::UPLOADED_APPLIANCE, &mut ctx)
-                .unwrap();
-        assert_eq!(expected.0["ref"], "审核失败");
-        assert_eq!(expected.1["inv"].len(), 2);
-        assert!(!expected.0.contains_key("ignored"));
-        let mut shared_ctx = super::super::PipelineContext::new();
-        // First run takes the uncached path and populates both tables.
-        assert_eq!(
-            uploaded::status_indices_in_context(
-                &dir,
-                &uploaded::UPLOADED_APPLIANCE,
-                &mut shared_ctx
-            )
-            .unwrap(),
-            expected
-        );
-        // Removing raw fixtures proves the second run borrows cached tables.
-        for merchant in [MERCHANT_APPLIANCE, MERCHANT_DIGITAL] {
-            std::fs::remove_file(dir.join(format!("MER_{merchant}_20261013101809_yjhx.xlsx")))
-                .unwrap();
+        let mut ctx = PipelineContext::new();
+        let mut shared_ctx = PipelineContext::new();
+        for group in [SubsidyGroup::Appliance, SubsidyGroup::Digital] {
+            let upload_job: &dyn Job = match group {
+                SubsidyGroup::Appliance => &uploaded::UPLOADED_APPLIANCE,
+                SubsidyGroup::Digital => &uploaded::UPLOADED_DIGITAL,
+            };
+            let refund_job: &dyn Job = match group {
+                SubsidyGroup::Appliance => &refund::REFUND_APPLIANCE,
+                SubsidyGroup::Digital => &refund::REFUND_DIGITAL,
+            };
+            // Scheduler-first builds indices while returning the table directly.
+            let expected_refund = refund_job.run_in_context(&dir, &mut ctx).unwrap();
+            assert!(expected_refund.rows.is_empty());
+            assert!(ctx.take_refund_table(group).is_none());
+            let expected_table = upload_job.run_in_context(&dir, &mut ctx).unwrap();
+            assert_eq!(expected_table.rows.len(), 4);
+            assert!(ctx.take_uploaded_table(group).is_none());
+            let expected = ctx.uploaded_status_index(group, &dir).unwrap();
+            let status = match group {
+                SubsidyGroup::Appliance => "审核失败",
+                SubsidyGroup::Digital => "待审核",
+            };
+            assert_eq!(
+                expected.resolve(Some("ref"), Some("inv")),
+                UploadedStatusMatch::Reference(status.into())
+            );
+            assert_eq!(
+                expected.resolve(None, Some("inv")),
+                UploadedStatusMatch::Ambiguous
+            );
+            assert_eq!(
+                expected.resolve(Some("ignored"), Some("ignored")),
+                UploadedStatusMatch::NoHit
+            );
+            // First run takes the uncached path and populates index cache.
+            let first = shared_ctx.uploaded_status_index(group, &dir).unwrap();
+            assert_eq!(first, expected);
+            let refund_index = shared_ctx.refund_subsidy_indices(group, &dir).unwrap();
+            assert_eq!(
+                refund_index,
+                ctx.refund_subsidy_indices(group, &dir).unwrap()
+            );
         }
-        assert_eq!(
-            uploaded::status_indices_in_context(
-                &dir,
-                &uploaded::UPLOADED_APPLIANCE,
-                &mut shared_ctx
-            )
-            .unwrap(),
-            expected
-        );
+        // Removing raw fixtures proves the second run reuses the cached index.
+        for path in crate::io::paths::list_xlsx_files(&dir).unwrap() {
+            std::fs::remove_file(path).unwrap();
+        }
+        for group in [SubsidyGroup::Appliance, SubsidyGroup::Digital] {
+            let upload_job: &dyn Job = match group {
+                SubsidyGroup::Appliance => &uploaded::UPLOADED_APPLIANCE,
+                SubsidyGroup::Digital => &uploaded::UPLOADED_DIGITAL,
+            };
+            let refund_job: &dyn Job = match group {
+                SubsidyGroup::Appliance => &refund::REFUND_APPLIANCE,
+                SubsidyGroup::Digital => &refund::REFUND_DIGITAL,
+            };
+            let first = shared_ctx.uploaded_status_index(group, &dir).unwrap();
+            let refund_first = shared_ctx.refund_subsidy_indices(group, &dir).unwrap();
+            // Dependency-first hands each pending table to the scheduler exactly once.
+            let uploaded_table = upload_job.run_in_context(&dir, &mut shared_ctx).unwrap();
+            assert_eq!(uploaded_table.rows.len(), 4);
+            assert!(shared_ctx.take_uploaded_table(group).is_none());
+            let refund_table = refund_job.run_in_context(&dir, &mut shared_ctx).unwrap();
+            assert!(refund_table.rows.is_empty());
+            assert!(shared_ctx.take_refund_table(group).is_none());
+            let second = shared_ctx.uploaded_status_index(group, &dir).unwrap();
+            assert_eq!(second, ctx.uploaded_status_index(group, &dir).unwrap());
+            assert!(Rc::ptr_eq(&first, &second));
+            assert!(Rc::ptr_eq(
+                &refund_first,
+                &shared_ctx.refund_subsidy_indices(group, &dir).unwrap()
+            ));
+            assert!(
+                PipelineContext::new()
+                    .uploaded_status_index(group, &dir)
+                    .is_err()
+            );
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1752,8 +1756,24 @@ mod tests {
         assert_eq!(table.rows[1].values[10], Value::Text("发票号状态".into()));
         assert_eq!(table.rows[2].values[10], Value::Text("未上传".into()));
         let stats = ctx.stats().unwrap();
-        assert_eq!(stats.hits, [1, 1, 1, 1]);
-        assert_eq!(stats.ambiguous, [0; 4]);
+        assert_eq!(
+            stats.hits,
+            MatchHits {
+                receipts: 1,
+                uploaded_reference: 1,
+                uploaded_invoice: 1,
+                unuploaded: 1
+            }
+        );
+        assert_eq!(stats.ambiguous, AmbiguityCounts::default());
+        assert_eq!(
+            stats.unuploaded,
+            UnuploadedBreakdown {
+                empty_keys: 1,
+                candidate_conflict: 0,
+                no_status: 0,
+            }
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
@@ -1769,6 +1789,7 @@ mod tests {
         receipts.insert(&key, "remark-b");
         let uploaded = HashMap::from([("11111111111N".into(), "status-a".into())]);
         let empty_index = MultiValueIndex::new();
+        let uploaded_status = UploadedStatusIndex::from_indices(uploaded, empty_index);
         let mut stats = MatchStats::default();
         for summary in ["11111111111N 22222222222N", "11111111111N"] {
             let row = to_row(
@@ -1784,8 +1805,7 @@ mod tests {
                 &authority,
                 &invoices,
                 &receipts,
-                &uploaded,
-                &empty_index,
+                &uploaded_status,
                 &mut stats,
             );
             assert_eq!(
@@ -1801,8 +1821,96 @@ mod tests {
             );
             assert_eq!(row.fill, None);
         }
-        assert_eq!(stats.hits, [0, 1, 0, 1]);
-        assert_eq!(stats.ambiguous, [1, 2, 2, 0]);
+        assert_eq!(
+            stats.hits,
+            MatchHits {
+                receipts: 0,
+                uploaded_reference: 1,
+                uploaded_invoice: 0,
+                unuploaded: 1
+            }
+        );
+        assert_eq!(
+            stats.ambiguous,
+            AmbiguityCounts {
+                reference: 1,
+                invoice: 2,
+                receipts: 2,
+                uploaded: 0
+            }
+        );
+        assert_eq!(
+            stats.unuploaded,
+            UnuploadedBreakdown {
+                empty_keys: 0,
+                candidate_conflict: 1,
+                no_status: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn unuploaded_reasons_partition_only_final_misses() {
+        let date = Value::Date(chrono::NaiveDate::from_ymd_opt(2026, 8, 29).unwrap());
+        let mut invoices = MultiValueIndex::new();
+        invoices.insert(build_match_doc_no(&date, "CONFLICT"), "INV-A");
+        invoices.insert(build_match_doc_no(&date, "CONFLICT"), "INV-B");
+        invoices.insert(build_match_doc_no(&date, "NO-STATUS"), "INV-C");
+        invoices.insert(build_match_doc_no(&date, "RETURN"), "INV-D");
+        invoices.insert(build_match_doc_no(&date, "RETURN"), "INV-E");
+        let mut receipts = MultiValueIndex::new();
+        receipts.insert(build_match_doc_no(&date, "RETURN"), "退货-退单");
+        let authority = HashSet::new();
+        let uploaded = HashMap::new();
+        let uploaded_invoices = MultiValueIndex::new();
+        let uploaded_status = UploadedStatusIndex::from_indices(uploaded, uploaded_invoices);
+        let mut stats = MatchStats::default();
+        for doc in ["EMPTY", "CONFLICT", "NO-STATUS", "RETURN"] {
+            let row = to_row(
+                CouponRecord {
+                    doc_no: doc.into(),
+                    doc_date: date.clone(),
+                    product_name: String::new(),
+                    brand: String::new(),
+                    finance_category: String::new(),
+                    subsidy: Decimal::ONE,
+                    summary: String::new(),
+                },
+                &authority,
+                &invoices,
+                &receipts,
+                &uploaded_status,
+                &mut stats,
+            );
+            assert_eq!(
+                row.values[10],
+                Value::Text(
+                    if doc == "RETURN" {
+                        "退货-退单"
+                    } else {
+                        "未上传"
+                    }
+                    .into()
+                )
+            );
+        }
+        assert_eq!(
+            stats.unuploaded,
+            UnuploadedBreakdown {
+                empty_keys: 1,
+                candidate_conflict: 1,
+                no_status: 1,
+            }
+        );
+        assert_eq!(
+            stats.hits,
+            MatchHits {
+                receipts: 1,
+                uploaded_reference: 0,
+                uploaded_invoice: 0,
+                unuploaded: 3
+            }
+        );
     }
 
     #[test]
@@ -1828,8 +1936,8 @@ mod tests {
         let mut dig_inv = MultiValueIndex::new();
         dig_inv.insert("INV_DIG", "数码发票审核失败");
 
-        let appliance_indices = (app_ref, app_inv);
-        let digital_indices = (dig_ref, dig_inv);
+        let appliance_indices = UploadedStatusIndex::from_indices(app_ref, app_inv);
+        let digital_indices = UploadedStatusIndex::from_indices(dig_ref, dig_inv);
 
         let mut reconciler = SalesCouponReconciler::new(
             &authority,
@@ -1926,7 +2034,23 @@ mod tests {
 
         // Check stats
         let stats = reconciler.stats();
-        assert_eq!(stats.hits, [1, 2, 1, 1]); // Stage1: 1, Stage2: 2, Stage3: 1, Stage4: 1
-        assert_eq!(stats.ambiguous, [0, 0, 0, 0]);
+        assert_eq!(
+            stats.hits,
+            MatchHits {
+                receipts: 1,
+                uploaded_reference: 2,
+                uploaded_invoice: 1,
+                unuploaded: 1
+            }
+        ); // Stage1: 1, Stage2: 2, Stage3: 1, Stage4: 1
+        assert_eq!(
+            stats.ambiguous,
+            AmbiguityCounts {
+                reference: 0,
+                invoice: 0,
+                receipts: 0,
+                uploaded: 0
+            }
+        );
     }
 }

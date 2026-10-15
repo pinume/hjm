@@ -3,13 +3,18 @@ use super::schema::Column;
 use super::style::Fill;
 use super::value::Value;
 
-#[derive(Debug, Clone)]
+/// 行数据。
+#[derive(Debug)]
 pub struct Row {
     pub values: Vec<Value>,
     pub fill: Option<Fill>,
 }
 
-#[derive(Debug, Clone)]
+/// 整张工作表数据。
+///
+/// 注意：为杜绝万级数据行在管线中发生内存克隆，`Table` 刻意不实现 `Clone`。
+/// 各任务需以所有权移交（如 `take_uploaded_table`）或只读借用（`&Table`）方式传递。
+#[derive(Debug)]
 pub struct Table {
     pub columns: Vec<Column>,
     pub rows: Vec<Row>,

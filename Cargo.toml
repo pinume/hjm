@@ -4,10 +4,15 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
 publish = false
+default-run = "hjm"
+
+[[bin]]
+name = "hjm"
+path = "src/main.rs"
 
 [[bin]]
 name = "subsidy"
-path = "src/main.rs"
+path = "src/bin/subsidy.rs"
 
 [dependencies]
 calamine = { version = "=0.36.1", features = ["dates"] }

@@ -19,15 +19,42 @@ pub enum Category {
     Coupons,
 }
 
+/// 清洗任务共享的补贴品类分组；不包含发票、收款单等无效任务类别。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubsidyGroup {
+    Appliance,
+    Digital,
+}
+
+impl SubsidyGroup {
+    fn uploaded_category(self) -> Category {
+        match self {
+            Self::Appliance => Category::UploadedAppliance,
+            Self::Digital => Category::UploadedDigital,
+        }
+    }
+
+    fn refund_category(self) -> Category {
+        match self {
+            Self::Appliance => Category::RefundAppliance,
+            Self::Digital => Category::RefundDigital,
+        }
+    }
+}
+
 pub(crate) mod context;
 pub(crate) mod multi_value_index;
-pub use context::{MatchStats, PipelineContext};
+pub use context::PipelineContext;
+pub(crate) mod match_stats;
+pub use match_stats::MatchStats;
 pub(crate) use multi_value_index::{MultiValueIndex, PriorityOutcome};
 
 pub trait Job {
     fn category(&self) -> Category;
     fn title(&self) -> &'static str;
-    fn output_stem(&self) -> &'static str;
+    fn output_stem(&self) -> &'static str {
+        self.title()
+    }
     fn run(&self, input_dir: &Path) -> Result<Table, ProcessError> {
         self.run_in_context(input_dir, &mut PipelineContext::new())
     }
@@ -85,31 +112,49 @@ pub(crate) fn cell_amount(cell: &RawCell) -> Result<Option<Decimal>, String> {
     }
 }
 
-/// 日期字段：源值为 Excel 日期序列值或`yyyymmdd`文本；无法识别时保留原值，不猜测修正
-/// （第 5、6 节的通用豁免）。
-pub(crate) fn cell_date_or_text(cell: &RawCell) -> Value {
-    if let RawCell::DateTime(serial) = cell {
-        return dates::date_from_serial(*serial)
-            .map_or_else(|| Value::Text(cell.to_string()), Value::Date);
-    }
+enum TemporalCell {
+    Empty,
+    Parsed(chrono::NaiveDateTime),
+    Unrecognized(String),
+}
+
+/// 只解释源单元格；保留原文或报错由各任务的既有 interface 决定。
+fn parse_temporal_cell(cell: &RawCell) -> TemporalCell {
     let text = cell.to_string();
     if text.trim().is_empty() {
-        return Value::Empty;
+        return TemporalCell::Empty;
     }
-    dates::parse_yyyymmdd(&text).map_or(Value::Text(text), Value::Date)
+    let parsed = match cell {
+        RawCell::DateTime(serial) => dates::datetime_from_serial(*serial),
+        _ => dates::parse_date_text(&text),
+    };
+    match parsed {
+        Some(datetime) => TemporalCell::Parsed(datetime),
+        None => TemporalCell::Unrecognized(text),
+    }
+}
+
+/// 日期字段：源值为 Excel 日期序列值或已确认格式的日期文本；无法识别时保留原值，不猜测修正
+/// （第 5、6 节的通用豁免）。
+pub(crate) fn cell_date_or_text(cell: &RawCell) -> Value {
+    match parse_temporal_cell(cell) {
+        TemporalCell::Empty => Value::Empty,
+        TemporalCell::Parsed(datetime) => Value::Date(datetime.date()),
+        // 仅宽容日期字段兼容裸 yyyymmdd，严格字段及日期时间字段沿用既有格式。
+        TemporalCell::Unrecognized(text) if !matches!(cell, RawCell::DateTime(_)) => {
+            dates::parse_yyyymmdd(&text).map_or(Value::Text(text), Value::Date)
+        }
+        TemporalCell::Unrecognized(text) => Value::Text(text),
+    }
 }
 
 /// 日期时间字段：保留到秒；无法识别时保留原值，不猜测修正（第 5、6 节的通用豁免）。
 pub(crate) fn cell_datetime_or_text(cell: &RawCell) -> Value {
-    if let RawCell::DateTime(serial) = cell {
-        return dates::datetime_from_serial(*serial)
-            .map_or_else(|| Value::Text(cell.to_string()), Value::DateTime);
+    match parse_temporal_cell(cell) {
+        TemporalCell::Empty => Value::Empty,
+        TemporalCell::Parsed(datetime) => Value::DateTime(datetime),
+        TemporalCell::Unrecognized(text) => Value::Text(text),
     }
-    let text = cell.to_string();
-    if text.trim().is_empty() {
-        return Value::Empty;
-    }
-    dates::parse_date_text(&text).map_or(Value::Text(text), Value::DateTime)
 }
 
 /// 数据异常错误的统一构造函数：文件名、工作表名、行号、字段名、原始值、异常说明。
@@ -131,41 +176,26 @@ pub(crate) fn data_error(
     }
 }
 
-/// 日期/日期时间/时间字段的共同骨架：为空时保持为空；有 Excel 序列值或文本但无法
-/// 识别时按数据异常终止。`from_serial`/`from_text`/`to_value`承载各字段类型的差异。
-#[allow(clippy::too_many_arguments)]
-fn parse_temporal_field<T>(
+/// 日期/日期时间字段的共同解析；空值保持为空，无法识别时报告位置。
+fn parse_temporal_field(
     cell: &RawCell,
     field: &str,
     file: &str,
     sheet: &str,
     row: u32,
     err_label: &str,
-    from_serial: impl FnOnce(f64) -> Option<T>,
-    from_text: impl FnOnce(&str) -> Option<T>,
-    to_value: impl FnOnce(T) -> Value,
-) -> Result<Value, ProcessError> {
-    match cell {
-        RawCell::Empty => Ok(Value::Empty),
-        RawCell::DateTime(serial) => from_serial(*serial).map(to_value).ok_or_else(|| {
-            data_error(
-                file,
-                sheet,
-                row,
-                field,
-                serial.to_string(),
-                err_label.to_string(),
-            )
-        }),
-        other => {
-            let text = other.to_string();
-            if text.trim().is_empty() {
-                return Ok(Value::Empty);
-            }
-            from_text(&text)
-                .map(to_value)
-                .ok_or_else(|| data_error(file, sheet, row, field, text, err_label.to_string()))
-        }
+) -> Result<Option<chrono::NaiveDateTime>, ProcessError> {
+    match parse_temporal_cell(cell) {
+        TemporalCell::Empty => Ok(None),
+        TemporalCell::Parsed(datetime) => Ok(Some(datetime)),
+        TemporalCell::Unrecognized(text) => Err(data_error(
+            file,
+            sheet,
+            row,
+            field,
+            text,
+            err_label.to_string(),
+        )),
     }
 }
 
@@ -177,17 +207,8 @@ pub(crate) fn parse_date_field(
     sheet: &str,
     row: u32,
 ) -> Result<Value, ProcessError> {
-    parse_temporal_field(
-        cell,
-        field,
-        file,
-        sheet,
-        row,
-        "无法解析为日期",
-        dates::date_from_serial,
-        |text| dates::parse_date_text(text).map(|dt| dt.date()),
-        Value::Date,
-    )
+    parse_temporal_field(cell, field, file, sheet, row, "无法解析为日期")
+        .map(|date| date.map_or(Value::Empty, |date| Value::Date(date.date())))
 }
 
 /// 日期时间字段：为空时保持为空；非空但无法识别时按数据异常终止。
@@ -198,17 +219,8 @@ pub(crate) fn parse_datetime_field(
     sheet: &str,
     row: u32,
 ) -> Result<Value, ProcessError> {
-    parse_temporal_field(
-        cell,
-        field,
-        file,
-        sheet,
-        row,
-        "无法解析为日期时间",
-        dates::datetime_from_serial,
-        dates::parse_date_text,
-        Value::DateTime,
-    )
+    parse_temporal_field(cell, field, file, sheet, row, "无法解析为日期时间")
+        .map(|date| date.map_or(Value::Empty, Value::DateTime))
 }
 
 /// 在表头中查找某统一字段的实际列号：候选同义词中恰好一个出现时返回该列号；
@@ -314,6 +326,70 @@ mod tests {
                 Category::Coupons,
             ]
         );
+    }
+
+    #[test]
+    fn temporal_fields_preserve_empty_serial_and_error_policies() {
+        let datetime = chrono::NaiveDate::from_ymd_opt(2026, 7, 28)
+            .unwrap()
+            .and_hms_opt(13, 5, 9)
+            .unwrap();
+        for cell in [RawCell::Empty, RawCell::Text("  ".into())] {
+            assert_eq!(cell_date_or_text(&cell), Value::Empty);
+            assert_eq!(cell_datetime_or_text(&cell), Value::Empty);
+            assert_eq!(
+                parse_date_field(&cell, "日期", "源.xlsx", "明细", 3).unwrap(),
+                Value::Empty
+            );
+            assert_eq!(
+                parse_datetime_field(&cell, "时间", "源.xlsx", "明细", 3).unwrap(),
+                Value::Empty
+            );
+        }
+        for cell in [
+            RawCell::DateTime(45943.5),
+            RawCell::Text("2026-07-28 13:05:09".into()),
+        ] {
+            assert_eq!(
+                cell_date_or_text(&cell),
+                parse_date_field(&cell, "日期", "源.xlsx", "明细", 3).unwrap()
+            );
+            assert_eq!(
+                cell_datetime_or_text(&cell),
+                parse_datetime_field(&cell, "时间", "源.xlsx", "明细", 3).unwrap()
+            );
+        }
+        assert_eq!(
+            cell_datetime_or_text(&RawCell::Text("2026-07-28 13:05:09".into())),
+            Value::DateTime(datetime)
+        );
+        // 第5、6节允许无法识别时保留原文；严格日期字段仍按各自业务规则报错。
+        for cell in [
+            RawCell::Text("2 中文日期".into()),
+            RawCell::DateTime(99991231.0),
+        ] {
+            let original = cell.to_string();
+            assert_eq!(cell_date_or_text(&cell), Value::Text(original.clone()));
+            assert_eq!(cell_datetime_or_text(&cell), Value::Text(original.clone()));
+            for result in [
+                parse_date_field(&cell, "日期", "源.xlsx", "明细", 3),
+                parse_datetime_field(&cell, "日期", "源.xlsx", "明细", 3),
+            ] {
+                assert!(
+                    matches!(result, Err(ProcessError::Data { file, sheet, row: 3, field, value, .. })
+                    if file == "源.xlsx" && sheet == "明细" && field == "日期" && value == original)
+                );
+            }
+        }
+        // 裸 yyyymmdd 只属于宽容日期字段的既有契约，不扩展严格字段或日期时间字段。
+        let compact = RawCell::Text("20260728".into());
+        assert_eq!(cell_date_or_text(&compact), Value::Date(datetime.date()));
+        assert_eq!(
+            cell_datetime_or_text(&compact),
+            Value::Text("20260728".into())
+        );
+        assert!(parse_date_field(&compact, "日期", "源.xlsx", "明细", 3).is_err());
+        assert!(parse_datetime_field(&compact, "时间", "源.xlsx", "明细", 3).is_err());
     }
 
     #[test]

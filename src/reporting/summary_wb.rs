@@ -1,14 +1,12 @@
+#[cfg(test)]
 use calamine::Data;
+#[cfg(test)]
 use rust_decimal::Decimal;
-use rust_xlsxwriter::{
-    Color, ConditionalFormatFormula, Format, Workbook, Worksheet, column_number_to_name,
-};
+use rust_xlsxwriter::Workbook;
 use std::path::Path;
 
-use super::excel::ReportSheetBuilder;
-use super::reader::{
-    cell_to_decimal, cell_to_string, get_colored_row_indices, get_colored_row_indices_multi,
-};
+use super::excel::{ColumnGroup, ReportSheetBuilder};
+use super::reader::{cell_to_string, get_colored_row_indices_multi};
 use super::styles::StylePool;
 
 use super::data::{CommonInputs, ReportColumn, SheetData};
@@ -16,7 +14,7 @@ use super::data::{CommonInputs, ReportColumn, SheetData};
 use super::reader::read_sheet_rows;
 use super::summary_data::{
     AnomalyColors, AnomalyDatasets, CategoryBrandSummary, FailedUploadRecord,
-    InvoiceAnomalySection, MetricRow, RefundAnomalySection, SUMMARY_STATUSES, SummaryMetrics,
+    InvoiceAnomalySection, RefundAnomalySection, SUMMARY_STATUSES, SummaryMetrics,
     build_invoice_name_index,
 };
 #[cfg(test)]
@@ -50,8 +48,12 @@ pub(crate) fn generate_with_inputs(
     let dig_refund_rows = &inputs.dig_refund;
     let app_refund_path = input_dir.join("回款明细家电电脑.xlsx");
     let dig_refund_path = input_dir.join("回款明细数码.xlsx");
-    let app_pink_rows = get_colored_row_indices(&app_refund_path, "FFFFC7CE")?;
-    let dig_pink_rows = get_colored_row_indices(&dig_refund_path, "FFFFC7CE")?;
+    let app_pink_rows = get_colored_row_indices_multi(&app_refund_path, &["FFFFC7CE"])?
+        .remove("FFFFC7CE")
+        .unwrap_or_default();
+    let dig_pink_rows = get_colored_row_indices_multi(&dig_refund_path, &["FFFFC7CE"])?
+        .remove("FFFFC7CE")
+        .unwrap_or_default();
     let invoice_path = input_dir.join("发票明细.xlsx");
     let mut inv_colors = get_colored_row_indices_multi(&invoice_path, &["FFFFEB9C", "FFFFC7CE"])?;
     let inv_yellow_rows = inv_colors.remove("FFFFEB9C").unwrap_or_default();
@@ -130,195 +132,83 @@ pub(crate) fn generate_with_inputs(
 }
 
 fn build_summary_sheet(wb: &mut Workbook, s: &StylePool, m: &SummaryMetrics) -> Result<(), String> {
-    let ws = wb.add_worksheet();
-    ws.set_name("汇总").map_err(|e| e.to_string())?;
-
-    ws.set_column_width(0, 38.0).map_err(|e| e.to_string())?;
+    let mut sheet = ReportSheetBuilder::new(wb, "汇总", s)?;
+    sheet.set_column_width(0, 38.0)?;
     for col in 1..=6 {
-        ws.set_column_width(col, 20.0).map_err(|e| e.to_string())?;
+        sheet.set_column_width(col, 20.0)?;
     }
 
-    // Convert Yuan to Wan Yuan
-    let to_wan = |d: Decimal| d / Decimal::from(10000);
-
-    // Row 1: Title
-    ws.set_row_height(0, 30.0).map_err(|e| e.to_string())?;
-    ws.merge_range(0, 0, 0, 6, "国补上传情况汇总", &s.title)
-        .map_err(|e| e.to_string())?;
-
-    // Row 2: Subtitle
-    ws.set_row_height(1, 22.0).map_err(|e| e.to_string())?;
-    ws.merge_range(
-        1,
-        0,
-        1,
+    // Row 1-3: Title, Subtitle, Blank
+    sheet.write_title_block(
         6,
+        "国补上传情况汇总",
         "数据截止口径：按所提供源文件全量数据统计；金额单位：万元",
-        &s.subtitle,
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
 
-    // Row 3: Blank
-    ws.set_row_height(2, 8.0).map_err(|e| e.to_string())?;
+    // Section 1 Header & Headers
+    sheet.write_section_header(6, "一、金额与数量汇总")?;
+    sheet.write_grouped_column_headers(&[
+        ColumnGroup {
+            title: "项目",
+            subheaders: &[],
+        },
+        ColumnGroup {
+            title: "家电电脑",
+            subheaders: &["金额（万元）", "笔数"],
+        },
+        ColumnGroup {
+            title: "数码",
+            subheaders: &["金额（万元）", "笔数"],
+        },
+        ColumnGroup {
+            title: "合计",
+            subheaders: &["金额（万元）", "笔数"],
+        },
+    ])?;
 
-    // Row 4: Section 1 Header
-    ws.set_row_height(3, 24.0).map_err(|e| e.to_string())?;
-    ws.merge_range(3, 0, 3, 6, "一、金额与数量汇总", &s.section_header)
-        .map_err(|e| e.to_string())?;
-
-    // Row 5 & 6: Col Headers
-    ws.set_row_height(4, 30.0).map_err(|e| e.to_string())?;
-    ws.set_row_height(5, 30.0).map_err(|e| e.to_string())?;
-    ws.merge_range(4, 0, 5, 0, "项目", &s.col_header_center)
-        .map_err(|e| e.to_string())?;
-    ws.merge_range(4, 1, 4, 2, "家电电脑", &s.col_header_center)
-        .map_err(|e| e.to_string())?;
-    ws.merge_range(4, 3, 4, 4, "数码", &s.col_header_center)
-        .map_err(|e| e.to_string())?;
-    ws.merge_range(4, 5, 4, 6, "合计", &s.col_header_center)
-        .map_err(|e| e.to_string())?;
-
-    for col in [1, 3, 5] {
-        ws.write_string_with_format(5, col, "金额（万元）", &s.col_header_center)
-            .map_err(|e| e.to_string())?;
-        ws.write_string_with_format(5, col + 1, "笔数", &s.col_header_center)
-            .map_err(|e| e.to_string())?;
+    // Table 1 Rows
+    for (name, row) in m.general_metrics() {
+        sheet.write_metric_count_row(name, row)?;
     }
-
-    // Table 1 Rows (Rows 7-14, 0-based 6-13)
-    let t1_data: [(&str, &MetricRow); 7] = [
-        ("国补发生额", &m.occur),
-        ("国补已回款额", &m.paid),
-        ("未回款", &m.unpaid),
-        ("审核通过未回款", &m.pass),
-        ("待审核", &m.wait),
-        ("审核失败", &m.fail),
-        ("未上传", &m.unup),
-    ];
-
-    let mut cur_row = 6;
-    for (i, (name, row)) in t1_data.iter().enumerate() {
-        if i == 3 {
-            // Row 10 (0-based 9): Tip row
-            ws.set_row_height(cur_row, 22.0)
-                .map_err(|e| e.to_string())?;
-            ws.merge_range(cur_row, 0, cur_row, 6, "未回款具体情况", &s.tip_row)
-                .map_err(|e| e.to_string())?;
-            cur_row += 1;
-        }
-
-        ws.set_row_height(cur_row, 22.0)
-            .map_err(|e| e.to_string())?;
-        ws.write_string_with_format(cur_row, 0, *name, &s.text_left)
-            .map_err(|e| e.to_string())?;
-        ws.write_with_format(cur_row, 1, to_wan(row.app_amt), &s.money)
-            .map_err(|e| e.to_string())?;
-        ws.write_number_with_format(cur_row, 2, row.app_cnt as f64, &s.int_count)
-            .map_err(|e| e.to_string())?;
-        ws.write_with_format(cur_row, 3, to_wan(row.dig_amt), &s.money)
-            .map_err(|e| e.to_string())?;
-        ws.write_number_with_format(cur_row, 4, row.dig_cnt as f64, &s.int_count)
-            .map_err(|e| e.to_string())?;
-        ws.write_with_format(cur_row, 5, to_wan(row.tot_amt()), &s.money)
-            .map_err(|e| e.to_string())?;
-        ws.write_number_with_format(cur_row, 6, row.tot_cnt() as f64, &s.int_count)
-            .map_err(|e| e.to_string())?;
-        cur_row += 1;
+    sheet.write_tip_row(6, "未回款具体情况")?;
+    for (name, row) in m.unpaid_detail_metrics() {
+        sheet.write_metric_count_row(name, row)?;
     }
+    sheet.write_blank_row(8.0)?;
 
-    // Row 15: Blank
-    ws.set_row_height(cur_row, 8.0).map_err(|e| e.to_string())?;
-    cur_row += 1;
-
-    // Row 16: Section 2 Header
-    ws.set_row_height(cur_row, 24.0)
-        .map_err(|e| e.to_string())?;
-    ws.merge_range(
-        cur_row,
-        0,
-        cur_row,
-        6,
-        "二、结构与比率分析",
-        &s.section_header,
-    )
-    .map_err(|e| e.to_string())?;
-    cur_row += 1;
-
-    // Row 17 & 18: Table 2 Headers
-    ws.set_row_height(cur_row, 30.0)
-        .map_err(|e| e.to_string())?;
-    ws.set_row_height(cur_row + 1, 30.0)
-        .map_err(|e| e.to_string())?;
-    ws.merge_range(cur_row, 0, cur_row + 1, 0, "指标", &s.col_header_center)
-        .map_err(|e| e.to_string())?;
-    ws.merge_range(cur_row, 1, cur_row, 2, "家电电脑", &s.col_header_center)
-        .map_err(|e| e.to_string())?;
-    ws.merge_range(cur_row, 3, cur_row, 4, "数码", &s.col_header_center)
-        .map_err(|e| e.to_string())?;
-    ws.merge_range(cur_row, 5, cur_row, 6, "合计", &s.col_header_center)
-        .map_err(|e| e.to_string())?;
-
-    for col in [1, 3, 5] {
-        ws.write_string_with_format(cur_row + 1, col, "金额（万元）", &s.col_header_center)
-            .map_err(|e| e.to_string())?;
-        ws.write_string_with_format(cur_row + 1, col + 1, "占比/比率", &s.col_header_center)
-            .map_err(|e| e.to_string())?;
-    }
-    cur_row += 2;
+    // Section 2 Header & Headers
+    sheet.write_section_header(6, "二、结构与比率分析")?;
+    sheet.write_grouped_column_headers(&[
+        ColumnGroup {
+            title: "指标",
+            subheaders: &[],
+        },
+        ColumnGroup {
+            title: "家电电脑",
+            subheaders: &["金额（万元）", "占比/比率"],
+        },
+        ColumnGroup {
+            title: "数码",
+            subheaders: &["金额（万元）", "占比/比率"],
+        },
+        ColumnGroup {
+            title: "合计",
+            subheaders: &["金额（万元）", "占比/比率"],
+        },
+    ])?;
 
     // Table 2 Ratios
-    let names = [
-        "国补发生额及占比",
-        "国补回款额及回款率",
-        "回款+审核通过未回款及综合回款率",
-        "未回款额",
-        "审核通过未回款",
-        "待审核",
-        "审核失败",
-        "未上传",
-    ];
-    for (i, (name, (a_amt, a_pct, d_amt, d_pct, t_amt, t_pct))) in
-        names.iter().zip(m.amount_ratios()).enumerate()
-    {
-        if i == 4 {
-            // Row 23 (0-based 22): Tip row
-            ws.set_row_height(cur_row, 22.0)
-                .map_err(|e| e.to_string())?;
-            ws.merge_range(cur_row, 0, cur_row, 6, "未回款具体情况", &s.tip_row)
-                .map_err(|e| e.to_string())?;
-            cur_row += 1;
-        }
-
-        ws.set_row_height(cur_row, 24.0)
-            .map_err(|e| e.to_string())?;
-        ws.write_string_with_format(cur_row, 0, *name, &s.text_left)
-            .map_err(|e| e.to_string())?;
-        ws.write_with_format(cur_row, 1, to_wan(a_amt), &s.money)
-            .map_err(|e| e.to_string())?;
-        ws.write_number_with_format(cur_row, 2, a_pct, &s.percent)
-            .map_err(|e| e.to_string())?;
-        ws.write_with_format(cur_row, 3, to_wan(d_amt), &s.money)
-            .map_err(|e| e.to_string())?;
-        ws.write_number_with_format(cur_row, 4, d_pct, &s.percent)
-            .map_err(|e| e.to_string())?;
-        ws.write_with_format(cur_row, 5, to_wan(t_amt), &s.money)
-            .map_err(|e| e.to_string())?;
-        ws.write_number_with_format(cur_row, 6, t_pct, &s.percent)
-            .map_err(|e| e.to_string())?;
-        cur_row += 1;
+    for item in m.general_ratios() {
+        sheet.write_metric_ratio_row(&item)?;
     }
+    sheet.write_tip_row(6, "未回款具体情况")?;
+    for item in m.unpaid_detail_ratios() {
+        sheet.write_metric_ratio_row(&item)?;
+    }
+    sheet.write_blank_row(8.0)?;
 
-    // Row 28: Blank
-    ws.set_row_height(cur_row, 8.0).map_err(|e| e.to_string())?;
-    cur_row += 1;
-
-    // Row 29: Notes Header
-    ws.set_row_height(cur_row, 24.0)
-        .map_err(|e| e.to_string())?;
-    ws.merge_range(cur_row, 0, cur_row, 6, "口径说明", &s.section_header)
-        .map_err(|e| e.to_string())?;
-    cur_row += 1;
-
+    // Notes Header & Notes
+    sheet.write_section_header(6, "口径说明")?;
     let notes = [
         "1. 国补发生额取自原始《销售用券情况统计.xlsx》的两列国补计入收入；包含退货负数冲减。",
         "2. 家电国补计入家电电脑发生额，数码国补计入数码发生额；发生笔数仍按清洗表财务大类和数量净额统计。",
@@ -326,14 +216,7 @@ fn build_summary_sheet(wb: &mut Workbook, s: &StylePool, m: &SummaryMetrics) -> 
         "4. 未回款=国补发生额-国补回款额；未上传=未回款-审核通过未回款-待审核-审核失败。",
         "5. 回款率=国补回款额/国补发生额；综合回款率=(国补回款额+审核通过未回款额)/国补发生额。",
     ];
-
-    for note in notes {
-        ws.set_row_height(cur_row, 28.0)
-            .map_err(|e| e.to_string())?;
-        ws.merge_range(cur_row, 0, cur_row, 6, note, &s.text_left)
-            .map_err(|e| e.to_string())?;
-        cur_row += 1;
-    }
+    sheet.write_notes(6, &notes)?;
 
     Ok(())
 }
@@ -343,88 +226,39 @@ fn build_category_brand_sheet(
     s: &StylePool,
     summary: &CategoryBrandSummary,
 ) -> Result<(), String> {
-    let ws = wb.add_worksheet();
-    ws.set_name("品类品牌汇总").map_err(|e| e.to_string())?;
-
-    ws.set_column_width(0, 16.0).map_err(|e| e.to_string())?;
-    ws.set_column_width(1, 20.0).map_err(|e| e.to_string())?;
+    let mut sheet = ReportSheetBuilder::new(wb, "品类品牌汇总", s)?;
+    sheet.set_column_width(0, 16.0)?;
+    sheet.set_column_width(1, 20.0)?;
     for col in 2..=11 {
-        ws.set_column_width(col, 16.0).map_err(|e| e.to_string())?;
+        sheet.set_column_width(col, 16.0)?;
     }
 
-    // Title & Subtitle
-    ws.set_row_height(0, 30.0).map_err(|e| e.to_string())?;
-    ws.merge_range(0, 0, 0, 11, "品类品牌汇总", &s.title)
-        .map_err(|e| e.to_string())?;
-
-    ws.set_row_height(1, 22.0).map_err(|e| e.to_string())?;
-    ws.merge_range(
-        1,
-        0,
-        1,
+    sheet.write_title_block(
         11,
+        "品类品牌汇总",
         "数据源：销售用券情况统计.xlsx；已排除退货-原单、退货-退单；金额单位：元",
-        &s.subtitle,
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
 
-    ws.set_row_height(2, 8.0).map_err(|e| e.to_string())?;
-
-    // Header 2 layers
-    ws.set_row_height(3, 30.0).map_err(|e| e.to_string())?;
-    ws.set_row_height(4, 30.0).map_err(|e| e.to_string())?;
-    ws.merge_range(3, 0, 4, 0, "财务大类", &s.col_header_center)
-        .map_err(|e| e.to_string())?;
-    ws.merge_range(3, 1, 4, 1, "品牌", &s.col_header_center)
-        .map_err(|e| e.to_string())?;
-    for (index, status) in SUMMARY_STATUSES.iter().enumerate() {
-        let col = 2 + index as u16 * 2;
-        ws.merge_range(3, col, 3, col + 1, status, &s.col_header_center)
-            .map_err(|e| e.to_string())?;
+    let mut groups = vec![
+        ColumnGroup {
+            title: "财务大类",
+            subheaders: &[],
+        },
+        ColumnGroup {
+            title: "品牌",
+            subheaders: &[],
+        },
+    ];
+    for status in SUMMARY_STATUSES {
+        groups.push(ColumnGroup {
+            title: status,
+            subheaders: &["补贴金额（元）", "数量"],
+        });
     }
+    sheet.write_grouped_column_headers(&groups)?;
 
-    for col in (2..12).step_by(2) {
-        ws.write_string_with_format(4, col, "补贴金额（元）", &s.col_header_center)
-            .map_err(|e| e.to_string())?;
-        ws.write_string_with_format(4, col + 1, "数量", &s.col_header_center)
-            .map_err(|e| e.to_string())?;
-    }
-
-    let mut row_idx: u32 = 5; // 0-indexed row 5 = Excel Row 6
     for group in summary.groups() {
-        let cat = &group.category;
-        let start_row = row_idx;
-        for brand in &group.brands {
-            ws.set_row_height(row_idx, 22.0)
-                .map_err(|e| e.to_string())?;
-            ws.write_string_with_format(row_idx, 0, cat, &s.text_center)
-                .map_err(|e| e.to_string())?;
-            ws.write_string_with_format(row_idx, 1, brand.brand.as_str(), &s.text_left)
-                .map_err(|e| e.to_string())?;
-
-            for (s_idx, &(amt, cnt)) in brand.totals.iter().enumerate() {
-                let col_amt = 2 + (s_idx as u16) * 2;
-                let col_cnt = col_amt + 1;
-
-                if amt.is_zero() && cnt == 0 {
-                    ws.write_string_with_format(row_idx, col_amt, "-", &s.text_right)
-                        .map_err(|e| e.to_string())?;
-                    ws.write_string_with_format(row_idx, col_cnt, "-", &s.text_right)
-                        .map_err(|e| e.to_string())?;
-                } else {
-                    ws.write_with_format(row_idx, col_amt, amt, &s.money)
-                        .map_err(|e| e.to_string())?;
-                    ws.write_number_with_format(row_idx, col_cnt, cnt as f64, &s.int_count)
-                        .map_err(|e| e.to_string())?;
-                }
-            }
-            row_idx += 1;
-        }
-        let end_row = row_idx - 1;
-        if end_row > start_row {
-            ws.merge_range(start_row, 0, end_row, 0, cat, &s.text_center)
-                .map_err(|e| e.to_string())?;
-        }
+        sheet.write_category_brand_group(&group.category, &group.brands)?;
     }
 
     Ok(())
@@ -486,50 +320,8 @@ fn build_failed_records_sheet(
     } else {
         dig_up.select(failed_fields, "已上传数码.xlsx")?
     };
-    let write_fail_row = |ws: &mut Worksheet,
-                          row: &[Data],
-                          columns: &[ReportColumn],
-                          extra1: &str,
-                          extra2: Option<&str>,
-                          cur_row: u32|
-     -> Result<(), String> {
-        ws.set_row_height(cur_row, 22.0)
-            .map_err(|e| e.to_string())?;
-        for (column, target) in columns.iter().zip([0, 1, 3, 4, 5, 6, 7]) {
-            if target == 3 {
-                ws.write_string_with_format(cur_row, 2, "审核失败", &s.text_left)
-                    .map_err(|e| e.to_string())?;
-            }
-            if target == 5 {
-                // Failed-upload invoice amounts retain the existing zero fallback.
-                let amount = cell_to_decimal(column.cell(row)).unwrap_or(Decimal::ZERO);
-                ws.write_with_format(cur_row, target, amount, &s.money)
-                    .map_err(|e| e.to_string())?;
-            } else {
-                column
-                    .kind
-                    .write(ws, s, cur_row, target, column.cell(row))?;
-            }
-        }
-        ws.write_string_with_format(cur_row, 8, extra1, &s.text_left)
-            .map_err(|e| e.to_string())?;
-        if let Some(e2) = extra2 {
-            ws.write_string_with_format(cur_row, 9, e2, &s.text_left)
-                .map_err(|e| e.to_string())?;
-        }
-        Ok(())
-    };
-
     for record in app_failed {
-        write_fail_row(
-            sheet.ws,
-            record.row,
-            &app_columns,
-            &record.extra1,
-            None,
-            sheet.cur_row,
-        )?;
-        sheet.cur_row += 1;
+        sheet.write_failed_upload_row(record, &app_columns)?;
     }
 
     // Blank row
@@ -553,15 +345,7 @@ fn build_failed_records_sheet(
     sheet.write_headers(&dig_headers)?;
 
     for record in dig_failed {
-        write_fail_row(
-            sheet.ws,
-            record.row,
-            &dig_columns,
-            &record.extra1,
-            record.extra2.as_deref(),
-            sheet.cur_row,
-        )?;
-        sheet.cur_row += 1;
+        sheet.write_failed_upload_row(record, &dig_columns)?;
     }
 
     Ok(())
@@ -610,26 +394,12 @@ fn build_refund_anomaly_sheet(
             .collect();
         sheet.write_headers(&field_strs)?;
 
-        let data_start_row = sheet.cur_row;
-        for row in &section.rows {
-            sheet.write_row(row, &columns)?;
-        }
-
-        if data_start_row < sheet.cur_row {
-            let reference_col = column_number_to_name(section.ref_col_idx as u16);
-            let first_row = data_start_row + 1;
-            let last_row = sheet.cur_row;
-            let rule = format!(
-                "=AND(${reference_col}{first_row}<>\"\",COUNTIF(${reference_col}${first_row}:${reference_col}${last_row},${reference_col}{first_row})=1)"
-            );
-            let highlight = ConditionalFormatFormula::new()
-                .set_rule(rule.as_str())
-                .set_format(Format::new().set_background_color(Color::RGB(0xFFF2CC)));
-            sheet
-                .ws
-                .add_conditional_format(data_start_row, 0, sheet.cur_row - 1, 23, &highlight)
-                .map_err(|e| e.to_string())?;
-        }
+        sheet.write_rows_with_unique_reference_highlight(
+            &section.rows,
+            &columns,
+            section.ref_col_idx as u16,
+            23,
+        )?;
         Ok(())
     };
 

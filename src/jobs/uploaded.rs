@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 use rust_decimal::Decimal;
 
@@ -11,11 +10,11 @@ use crate::utils::merchant::{
     APPLIANCE_COMPUTER_MERCHANT_NO, DIGITAL_MERCHANT_NO, STORE_MERCHANT_NOS,
 };
 
-use super::refund::{REFUND_APPLIANCE, REFUND_DIGITAL, subsidy_indices};
+use super::refund::RefundSubsidyIndices;
 use super::{
-    Category, Job, MultiValueIndex, PipelineContext, PriorityOutcome, amount_value, cell_amount,
-    cell_date_or_text, cell_datetime_or_text, cell_text, data_error, resolve_synonym_column,
-    text_value,
+    Category, Job, MultiValueIndex, PipelineContext, PriorityOutcome, SubsidyGroup, amount_value,
+    cell_amount, cell_date_or_text, cell_datetime_or_text, cell_text, data_error,
+    resolve_synonym_column, text_value,
 };
 
 /// 前25列两组数据组结构完全相同，按固定列位置读取。
@@ -306,7 +305,7 @@ const DIGITAL_COMPUTER_VARIANTS: [SheetVariant; 1] = [SheetVariant {
 // 固定列位置（1 基）。
 
 struct UploadedConfig {
-    category: Category,
+    group: SubsidyGroup,
     title: &'static str,
     output_stem: &'static str,
     merchant_no: &'static str,
@@ -315,7 +314,7 @@ struct UploadedConfig {
 }
 
 const DIGITAL_CONFIG: UploadedConfig = UploadedConfig {
-    category: Category::UploadedDigital,
+    group: SubsidyGroup::Digital,
     title: "数码已上传数据",
     output_stem: "已上传数码",
     merchant_no: DIGITAL_MERCHANT_NO,
@@ -324,7 +323,7 @@ const DIGITAL_CONFIG: UploadedConfig = UploadedConfig {
 };
 
 const APPLIANCE_CONFIG: UploadedConfig = UploadedConfig {
-    category: Category::UploadedAppliance,
+    group: SubsidyGroup::Appliance,
     title: "家电、电脑已上传数据",
     output_stem: "已上传家电电脑",
     merchant_no: APPLIANCE_COMPUTER_MERCHANT_NO,
@@ -333,13 +332,10 @@ const APPLIANCE_CONFIG: UploadedConfig = UploadedConfig {
 };
 
 /// 第5.7节：未命中回款明细时，“交易金额×15%”估算补贴金额的封顶值。
-fn subsidy_cap(category: Category) -> Decimal {
-    match category {
-        Category::UploadedDigital => Decimal::new(50000, 2), // 500.00
-        Category::UploadedAppliance => Decimal::new(150000, 2), // 1500.00
-        other => unreachable!(
-            "UploadedConfig 只用于 UploadedAppliance/UploadedDigital，实际为 {other:?}"
-        ),
+fn subsidy_cap(group: SubsidyGroup) -> Decimal {
+    match group {
+        SubsidyGroup::Digital => Decimal::new(50000, 2), // 500.00
+        SubsidyGroup::Appliance => Decimal::new(150000, 2), // 1500.00
     }
 }
 
@@ -350,7 +346,7 @@ pub const UPLOADED_APPLIANCE: UploadedJob = UploadedJob(&APPLIANCE_CONFIG);
 
 impl Job for UploadedJob {
     fn category(&self) -> Category {
-        self.0.category
+        self.0.group.uploaded_category()
     }
 
     fn title(&self) -> &'static str {
@@ -366,11 +362,11 @@ impl Job for UploadedJob {
         input_dir: &Path,
         ctx: &mut PipelineContext,
     ) -> Result<Table, ProcessError> {
-        if let Some(cached) = ctx.get_table(self.0.category) {
+        if let Some(cached) = ctx.take_uploaded_table(self.0.group) {
             return Ok(cached);
         }
         let table = run_uploaded(self.0, input_dir, ctx)?;
-        ctx.store_table(self.0.category, table.clone());
+        ctx.store_uploaded_index(self.0.group, UploadedStatusIndex::from_table(&table));
         Ok(table)
     }
 }
@@ -455,7 +451,7 @@ fn read_typed_cell(
     sheet_name: &str,
     row: u32,
 ) -> Result<Value, ProcessError> {
-    Ok(match ty {
+    let value = match ty {
         ColumnType::Date => cell_date_or_text(cell),
         ColumnType::DateTime => cell_datetime_or_text(cell),
         ColumnType::Decimal(_) => cell_amount(cell)
@@ -464,7 +460,15 @@ fn read_typed_cell(
         _ => text_value(cell_text(cell).map_err(|detail| {
             data_error(file, sheet_name, row, field, cell.to_string(), detail)
         })?),
-    })
+    };
+    if matches!(ty, ColumnType::Date | ColumnType::DateTime)
+        && let Value::Text(text) = &value
+    {
+        eprintln!(
+            "[警告] {file} / {sheet_name} 第{row}行 [{field}]：日期值“{text}”无法解析，已保留原文本。"
+        );
+    }
+    Ok(value)
 }
 
 fn read_row(
@@ -526,15 +530,24 @@ const VALUE_COL_REFERENCE: usize = 6; // 检索参考号
 const VALUE_COL_STATUS: usize = 8; // 状态
 const VALUE_COL_INVOICE_NO: usize = 19; // 发票号码
 
-/// 按对应类别构建状态索引；参考号是唯一业务键，发票号码可能对应多条记录。
-pub(super) fn status_indices_in_context(
-    input_dir: &Path,
-    job: &UploadedJob,
-    ctx: &mut PipelineContext,
-) -> Result<(HashMap<String, String>, MultiValueIndex), ProcessError> {
-    let mut by_reference = HashMap::new();
-    let mut by_invoice_no = MultiValueIndex::new();
-    let mut accumulate = |table: &Table| {
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum UploadedStatusMatch {
+    Reference(String),
+    Invoice(String),
+    Ambiguous,
+    NoHit,
+}
+
+/// 第10.12.2节：封装一组已上传记录的双键状态匹配及空状态过滤。
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct UploadedStatusIndex {
+    by_reference: HashMap<String, String>,
+    by_invoice_no: MultiValueIndex,
+}
+
+impl UploadedStatusIndex {
+    pub(crate) fn from_table(table: &Table) -> Self {
+        let mut index = Self::default();
         for row in &table.rows {
             let Value::Text(status) = &row.values[VALUE_COL_STATUS] else {
                 continue;
@@ -543,35 +556,56 @@ pub(super) fn status_indices_in_context(
                 continue;
             }
             if let Value::Text(reference) = &row.values[VALUE_COL_REFERENCE] {
-                by_reference.insert(reference.clone(), status.clone());
+                index.by_reference.insert(reference.clone(), status.clone());
             }
             if let Value::Text(invoice_no) = &row.values[VALUE_COL_INVOICE_NO] {
-                by_invoice_no.insert(invoice_no.clone(), status.clone());
+                index
+                    .by_invoice_no
+                    .insert(invoice_no.clone(), status.clone());
             }
         }
-    };
-    if ctx.with_table(job.category(), &mut accumulate).is_none() {
-        accumulate(&job.run_in_context(input_dir, ctx)?);
+        index
     }
-    Ok((by_reference, by_invoice_no))
+
+    pub(crate) fn resolve(
+        &self,
+        reference: Option<&str>,
+        invoice: Option<&str>,
+    ) -> UploadedStatusMatch {
+        if let Some(status) = reference
+            .filter(|key| !key.is_empty())
+            .and_then(|key| self.by_reference.get(key))
+            .filter(|status| !status.is_empty())
+        {
+            return UploadedStatusMatch::Reference(status.clone());
+        }
+        match self.by_invoice_no.resolve(invoice) {
+            PriorityOutcome::Unique(status) => UploadedStatusMatch::Invoice(status),
+            PriorityOutcome::Ambiguous => UploadedStatusMatch::Ambiguous,
+            PriorityOutcome::NoHit => UploadedStatusMatch::NoHit,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_indices(
+        by_reference: HashMap<String, String>,
+        by_invoice_no: MultiValueIndex,
+    ) -> Self {
+        Self {
+            by_reference,
+            by_invoice_no,
+        }
+    }
 }
 
 /// 按`订单号`（主键）→`检索参考号`（次键）依次在回款明细索引中查找
 /// 唯一命中的`补贴金额`；命中即停，同级歧义立即停止、不再尝试下一级。
 fn matched_refund_subsidy(
-    by_order: &MultiValueIndex,
-    by_reference: &MultiValueIndex,
+    indices: &RefundSubsidyIndices,
     order_no: &str,
     reference: &str,
 ) -> Option<Decimal> {
-    for (index, key) in [(by_order, order_no), (by_reference, reference)] {
-        match index.resolve(Some(key)) {
-            PriorityOutcome::Unique(value) => return Decimal::from_str(&value).ok(),
-            PriorityOutcome::Ambiguous => return None,
-            PriorityOutcome::NoHit => {}
-        }
-    }
-    None
+    indices.resolve_subsidy(order_no, reference)
 }
 
 fn value_text(value: &Value) -> &str {
@@ -637,6 +671,17 @@ fn collect_merchant_files(
     Ok(files)
 }
 
+pub(crate) fn load_uploaded_table(
+    group: SubsidyGroup,
+    input_dir: &Path,
+    ctx: &mut PipelineContext,
+) -> Result<Table, ProcessError> {
+    match group {
+        SubsidyGroup::Appliance => run_uploaded(&APPLIANCE_CONFIG, input_dir, ctx),
+        SubsidyGroup::Digital => run_uploaded(&DIGITAL_CONFIG, input_dir, ctx),
+    }
+}
+
 fn run_uploaded(
     config: &UploadedConfig,
     input_dir: &Path,
@@ -651,21 +696,8 @@ fn run_uploaded(
 
     // 补贴金额匹配的回款明细依赖：缺失或结构异常时同样必须停止，直接复用 RefundJob::run()
     // 的全部校验；只取其“正常区域”（非粉色沉底/重复记录）作为匹配对象。
-    let refund_job: &dyn Job = match config.category {
-        Category::UploadedAppliance => &REFUND_APPLIANCE,
-        Category::UploadedDigital => &REFUND_DIGITAL,
-        other => unreachable!(
-            "UploadedConfig 只用于 UploadedAppliance/UploadedDigital，实际为 {other:?}"
-        ),
-    };
-    let (by_order, by_reference) = match ctx.with_table(refund_job.category(), subsidy_indices) {
-        Some(indices) => indices,
-        None => {
-            let refund_table = refund_job.run_in_context(input_dir, ctx)?;
-            subsidy_indices(&refund_table)
-        }
-    };
-    let subsidy_cap = subsidy_cap(config.category);
+    let refund_indices = ctx.refund_subsidy_indices(config.group, input_dir)?;
+    let subsidy_cap = subsidy_cap(config.group);
 
     let mut rows = Vec::new();
 
@@ -694,8 +726,7 @@ fn run_uploaded(
                 }
 
                 let subsidy = matched_refund_subsidy(
-                    &by_order,
-                    &by_reference,
+                    &refund_indices,
                     value_text(&record_row.values[VALUE_COL_ORDER_NO]),
                     value_text(&record_row.values[VALUE_COL_REFERENCE]),
                 );
@@ -1378,6 +1409,38 @@ mod tests {
         assert_eq!(table.rows[0].values[4], Value::Text("不是日期".to_string()));
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn chinese_date_converts_without_guessing_malformed_values() {
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 6, 15).unwrap();
+        for (text, expected) in [
+            ("2026年06月15日", Value::Date(date)),
+            (
+                "20260303 17:19",
+                Value::Date(chrono::NaiveDate::from_ymd_opt(2026, 3, 3).unwrap()),
+            ),
+            ("2 2026年06月15日", Value::Date(date)),
+            (
+                "2026.0101",
+                Value::Date(chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()),
+            ),
+            ("不是有效日期", Value::Text("不是有效日期".into())),
+            ("2 中文日期", Value::Text("2 中文日期".into())),
+        ] {
+            assert_eq!(
+                read_typed_cell(
+                    &RawCell::Text(text.into()),
+                    ColumnType::Date,
+                    "开票日期",
+                    "source.xlsx",
+                    "家电",
+                    3
+                )
+                .unwrap(),
+                expected,
+            );
+        }
     }
 
     #[test]

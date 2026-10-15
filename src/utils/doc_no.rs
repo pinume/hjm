@@ -24,25 +24,26 @@ impl MatchDocNo {
     pub fn from_remark(remark: &str) -> Option<Self> {
         let fixed = apply_known_remark_fixes(remark);
 
-        let dates_found: HashSet<NaiveDate> = date_label_regex()
-            .captures_iter(&fixed)
-            .filter_map(|caps| parse_labeled_date(&caps[1], &caps[2], &caps[3]))
-            .collect();
+        let mut dates_found = HashSet::new();
+        // 第3.4节：逐一校验所有日期标签；非法候选不能被过滤后再任选合法日期。
+        for label in date_label_regex().find_iter(&fixed) {
+            let caps = date_value_regex().captures(&fixed[label.end()..])?;
+            dates_found.insert(parse_labeled_date(&caps[1], &caps[2], &caps[3])?);
+        }
         if dates_found.len() != 1 {
             return None;
         }
         let date = *dates_found.iter().next().unwrap();
 
-        let raw_doc_nos: HashSet<&str> = doc_no_label_regex()
+        let doc_nos: HashSet<&str> = doc_no_label_regex()
             .captures_iter(&fixed)
-            .map(|caps| caps.get(1).unwrap().as_str())
+            .map(|caps| strip_receipt_prefix(caps.get(1).unwrap().as_str()))
             .collect();
-        if raw_doc_nos.len() != 1 {
+        if doc_nos.len() != 1 {
             return None;
         }
-        let raw_doc_no = *raw_doc_nos.iter().next().unwrap();
-        let stripped = strip_receipt_prefix(raw_doc_no);
-        let normalized = normalize_document_no(stripped)?;
+        let doc_no = *doc_nos.iter().next().unwrap();
+        let normalized = normalize_document_no(doc_no)?;
         Some(Self(format!("{}{}", date.format("%y%m%d"), normalized)))
     }
 
@@ -60,23 +61,30 @@ fn apply_known_remark_fixes(remark: &str) -> String {
 }
 
 fn date_label_regex() -> &'static Regex {
+    static RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?:销售日期|购机日期|购机时间)[：:、\s]*").unwrap());
+    &RE
+}
+
+fn date_value_regex() -> &'static Regex {
     static RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(
-            r"(?:销售日期|购机日期)[：:、\s]*([0-9]{2,4})[-./年]([0-9]{1,2})[-./月]([0-9]{1,2})日?",
-        )
-        .unwrap()
+        // 先读取完整数字段，再检查长度，避免把190日截成19日。
+        Regex::new(r"^([0-9]+)[-./年]([0-9]+)[-./月]([0-9]+)日?").unwrap()
     });
     &RE
 }
 
 fn doc_no_label_regex() -> &'static Regex {
     static RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?:单据号收款号|单据号收款|单据收款号|单据号)[：:、\s]*((?:收款)?[A-Za-z]*[0-9][A-Za-z0-9]*)").unwrap()
+        Regex::new(r"(?:单据号收款号|单据号收款|单据收款号|收款单号|单据号)[：:、\s]*((?:收款)?[A-Za-z]*[0-9][A-Za-z0-9]*)").unwrap()
     });
     &RE
 }
 
 fn parse_labeled_date(year: &str, month: &str, day: &str) -> Option<NaiveDate> {
+    if !matches!(year.len(), 2 | 4) || month.len() > 2 || day.len() > 2 {
+        return None;
+    }
     let mut year: i32 = year.parse().ok()?;
     if year < 100 {
         year += 2000;
@@ -202,6 +210,13 @@ mod tests {
         assert_eq!(
             MatchDocNo::from_remark("销售日期：2026-07-28 销售日期：2026-07-28 单据号：ZEXQ000062")
                 .as_deref(),
+            Some("260728ZEXQ000062")
+        );
+        assert_eq!(
+            MatchDocNo::from_remark(
+                "销售日期：2026-07-28 单据号：ZEXQ000062 收款单号：收款ZEXQ000062"
+            )
+            .as_deref(),
             Some("260728ZEXQ000062")
         );
     }

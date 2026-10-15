@@ -70,7 +70,31 @@ impl MetricRow {
         }
     }
 
-    fn subtract(self, other: Self) -> Self {
+    pub fn tot_amt(&self) -> Decimal {
+        self.app_amt + self.dig_amt
+    }
+
+    pub fn tot_cnt(&self) -> i64 {
+        self.app_cnt + self.dig_cnt
+    }
+
+    pub fn app_amt_wan(&self) -> Decimal {
+        self.app_amt / Decimal::from(10000)
+    }
+
+    pub fn dig_amt_wan(&self) -> Decimal {
+        self.dig_amt / Decimal::from(10000)
+    }
+
+    pub fn tot_amt_wan(&self) -> Decimal {
+        self.tot_amt() / Decimal::from(10000)
+    }
+}
+
+impl std::ops::Sub for MetricRow {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
         Self::new(
             self.app_amt - other.app_amt,
             self.app_cnt - other.app_cnt,
@@ -78,13 +102,51 @@ impl MetricRow {
             self.dig_cnt - other.dig_cnt,
         )
     }
+}
 
-    pub fn tot_amt(&self) -> Decimal {
-        self.app_amt + self.dig_amt
+/// 汇总表结构与比率分析的领域值对象
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SummaryRatioItem {
+    pub name: &'static str,
+    pub app_amt: Decimal,
+    pub app_pct: f64,
+    pub dig_amt: Decimal,
+    pub dig_pct: f64,
+    pub tot_amt: Decimal,
+    pub tot_pct: f64,
+}
+
+impl SummaryRatioItem {
+    pub fn new(
+        name: &'static str,
+        app_amt: Decimal,
+        app_pct: f64,
+        dig_amt: Decimal,
+        dig_pct: f64,
+        tot_amt: Decimal,
+        tot_pct: f64,
+    ) -> Self {
+        Self {
+            name,
+            app_amt,
+            app_pct,
+            dig_amt,
+            dig_pct,
+            tot_amt,
+            tot_pct,
+        }
     }
 
-    pub fn tot_cnt(&self) -> i64 {
-        self.app_cnt + self.dig_cnt
+    pub fn app_amt_wan(&self) -> Decimal {
+        self.app_amt / Decimal::from(10000)
+    }
+
+    pub fn dig_amt_wan(&self) -> Decimal {
+        self.dig_amt / Decimal::from(10000)
+    }
+
+    pub fn tot_amt_wan(&self) -> Decimal {
+        self.tot_amt / Decimal::from(10000)
     }
 }
 
@@ -100,8 +162,34 @@ pub struct SummaryMetrics {
 }
 
 impl SummaryMetrics {
-    /// 数值顺序：发生、已回款、综合回款、未回款、通过、待审、失败、未上传。
-    pub(crate) fn amount_ratios(&self) -> [(Decimal, f64, Decimal, f64, Decimal, f64); 8] {
+    pub fn general_metrics(&self) -> [(&'static str, &MetricRow); 3] {
+        [
+            ("国补发生额", &self.occur),
+            ("国补已回款额", &self.paid),
+            ("未回款", &self.unpaid),
+        ]
+    }
+
+    pub fn unpaid_detail_metrics(&self) -> [(&'static str, &MetricRow); 4] {
+        [
+            ("审核通过未回款", &self.pass),
+            ("待审核", &self.wait),
+            ("审核失败", &self.fail),
+            ("未上传", &self.unup),
+        ]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn amount_ratios(&self) -> [SummaryRatioItem; 8] {
+        let general = self.general_ratios();
+        let unpaid = self.unpaid_detail_ratios();
+        [
+            general[0], general[1], general[2], general[3], unpaid[0], unpaid[1], unpaid[2],
+            unpaid[3],
+        ]
+    }
+
+    pub(crate) fn general_ratios(&self) -> [SummaryRatioItem; 4] {
         let combined = MetricRow::new(
             self.paid.app_amt + self.pass.app_amt,
             0,
@@ -109,8 +197,9 @@ impl SummaryMetrics {
             0,
         );
         let total = self.occur.tot_amt();
-        let ratio = |row: &MetricRow, denominator: &MetricRow| {
-            (
+        let ratio = |name: &'static str, row: &MetricRow, denominator: &MetricRow| {
+            SummaryRatioItem::new(
+                name,
                 row.app_amt,
                 div_pct(row.app_amt, denominator.app_amt),
                 row.dig_amt,
@@ -120,8 +209,8 @@ impl SummaryMetrics {
             )
         };
         [
-            // 合计占比也遵循零分母为零的规则。
-            (
+            SummaryRatioItem::new(
+                "国补发生额及占比",
                 self.occur.app_amt,
                 div_pct(self.occur.app_amt, total),
                 self.occur.dig_amt,
@@ -129,13 +218,29 @@ impl SummaryMetrics {
                 total,
                 div_pct(total, total),
             ),
-            ratio(&self.paid, &self.occur),
-            ratio(&combined, &self.occur),
-            ratio(&self.unpaid, &self.occur),
-            ratio(&self.pass, &self.unpaid),
-            ratio(&self.wait, &self.unpaid),
-            ratio(&self.fail, &self.unpaid),
-            ratio(&self.unup, &self.unpaid),
+            ratio("国补回款额及回款率", &self.paid, &self.occur),
+            ratio("回款+审核通过未回款及综合回款率", &combined, &self.occur),
+            ratio("未回款额", &self.unpaid, &self.occur),
+        ]
+    }
+
+    pub(crate) fn unpaid_detail_ratios(&self) -> [SummaryRatioItem; 4] {
+        let ratio = |name: &'static str, row: &MetricRow, denominator: &MetricRow| {
+            SummaryRatioItem::new(
+                name,
+                row.app_amt,
+                div_pct(row.app_amt, denominator.app_amt),
+                row.dig_amt,
+                div_pct(row.dig_amt, denominator.dig_amt),
+                row.tot_amt(),
+                div_pct(row.tot_amt(), denominator.tot_amt()),
+            )
+        };
+        [
+            ratio("审核通过未回款", &self.pass, &self.unpaid),
+            ratio("待审核", &self.wait, &self.unpaid),
+            ratio("审核失败", &self.fail, &self.unpaid),
+            ratio("未上传", &self.unup, &self.unpaid),
         ]
     }
 
@@ -162,12 +267,8 @@ impl SummaryMetrics {
         }
         metrics.occur.app_amt = totals[0];
         metrics.occur.dig_amt = totals[1];
-        metrics.unpaid = metrics.occur.subtract(metrics.paid);
-        metrics.unup = metrics
-            .unpaid
-            .subtract(metrics.pass)
-            .subtract(metrics.wait)
-            .subtract(metrics.fail);
+        metrics.unpaid = metrics.occur - metrics.paid;
+        metrics.unup = metrics.unpaid - metrics.pass - metrics.wait - metrics.fail;
         Ok(metrics)
     }
 
@@ -227,11 +328,11 @@ impl SummaryMetrics {
             dig_gen_cnt.to_i64().unwrap_or(0),
         );
         let paid = by_status("已回款");
-        let unpaid = occur.subtract(paid);
+        let unpaid = occur - paid;
         let pass = by_status("审核通过未回款");
         let wait = by_status("待审核");
         let fail = by_status("审核失败");
-        let unup = unpaid.subtract(pass).subtract(wait).subtract(fail);
+        let unup = unpaid - pass - wait - fail;
         Ok(Self {
             occur,
             paid,
@@ -247,9 +348,32 @@ impl SummaryMetrics {
 pub(crate) const SUMMARY_STATUSES: [&str; 5] =
     ["已回款", "审核通过未回款", "待审核", "审核失败", "未上传"];
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StatusAmountCount {
+    pub amount: Decimal,
+    pub count: i64,
+}
+
+impl StatusAmountCount {
+    #[cfg(test)]
+    pub const ZERO: Self = Self {
+        amount: Decimal::ZERO,
+        count: 0,
+    };
+
+    #[cfg(test)]
+    pub fn new(amount: Decimal, count: i64) -> Self {
+        Self { amount, count }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.amount.is_zero() && self.count == 0
+    }
+}
+
 pub(crate) struct BrandSummary {
     pub brand: String,
-    pub totals: [(Decimal, i64); 5],
+    pub totals: [StatusAmountCount; 5],
 }
 
 pub(crate) struct CategorySummary {
@@ -272,7 +396,7 @@ impl CategoryBrandSummary {
         let qty_idx = h.require("数量", "销售用券情况统计.xlsx")?;
         let remark_idx = h.require("备注", "销售用券情况统计.xlsx")?;
 
-        let mut categories: BTreeMap<String, BTreeMap<String, [(Decimal, i64); 5]>> =
+        let mut categories: BTreeMap<String, BTreeMap<String, [StatusAmountCount; 5]>> =
             BTreeMap::new();
         for row in &sales[1..] {
             let remark = cell_to_string(&row[remark_idx]);
@@ -286,8 +410,8 @@ impl CategoryBrandSummary {
                 .or_default();
             // 非展示状态仍保留实际品类品牌组合，但不计入五状态数值。
             if let Some(status) = SUMMARY_STATUSES.iter().position(|value| *value == remark) {
-                totals[status].0 += cell_to_decimal(&row[sub_idx]).unwrap_or(Decimal::ZERO);
-                totals[status].1 += cell_to_decimal(&row[qty_idx])
+                totals[status].amount += cell_to_decimal(&row[sub_idx]).unwrap_or(Decimal::ZERO);
+                totals[status].count += cell_to_decimal(&row[qty_idx])
                     .and_then(|d| d.to_i64())
                     .unwrap_or(0);
             }
@@ -358,12 +482,18 @@ pub(crate) struct AnomalyColors {
     pub invoice_pink: HashSet<u32>,
 }
 
-/// 审核失败明细行模型（包含已关联商品名称或数码 IMEI）
+/// 审核失败明细附加信息（家电电脑为发票匹配商品名称，数码为 IMEI1/IMEI2）
+#[derive(Debug, PartialEq, Clone)]
+pub(crate) enum FailedUploadExtra {
+    ApplianceProductName(String),
+    DigitalImei { imei1: String, imei2: String },
+}
+
+/// 审核失败明细行模型（包含源行及已关联商品名称或数码 IMEI）
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) struct FailedUploadRecord<'a> {
     pub row: &'a [Data],
-    pub extra1: String,
-    pub extra2: Option<String>,
+    pub extra: FailedUploadExtra,
 }
 
 /// 异常回款明细节模型（封装参考号多重度分组与排序）
@@ -441,13 +571,15 @@ impl<'a> FailedUploadRecord<'a> {
                 let prod_name = invoice_names.get(&inv_no).cloned().unwrap_or_default();
                 FailedUploadRecord {
                     row: row.as_slice(),
-                    extra1: prod_name,
-                    extra2: None,
+                    extra: FailedUploadExtra::ApplianceProductName(prod_name),
                 }
             })
             .collect();
 
-        records.sort_by_key(|r| (r.extra1.is_empty(), r.extra1.clone()));
+        records.sort_by_key(|r| match &r.extra {
+            FailedUploadExtra::ApplianceProductName(name) => (name.is_empty(), name.clone()),
+            _ => (true, String::new()),
+        });
         Ok(records)
     }
 
@@ -470,8 +602,7 @@ impl<'a> FailedUploadRecord<'a> {
                 let imei2 = cell_to_string(&row[imei2_idx]);
                 FailedUploadRecord {
                     row: row.as_slice(),
-                    extra1: imei1,
-                    extra2: Some(imei2),
+                    extra: FailedUploadExtra::DigitalImei { imei1, imei2 },
                 }
             })
             .collect();
@@ -613,31 +744,32 @@ mod tests {
                 ("Z", "B")
             ]
         );
-        let zero = (Decimal::ZERO, 0);
+        let zero = StatusAmountCount::ZERO;
+        let sc = StatusAmountCount::new;
         let brands = &summary.groups()[0].brands;
         assert_eq!(
             brands[0].totals,
-            [zero, zero, (Decimal::from(5), 2), zero, zero]
+            [zero, zero, sc(Decimal::from(5), 2), zero, zero]
         );
         assert_eq!(
             brands[1].totals,
-            [(Decimal::from(8), 0), zero, zero, zero, zero]
+            [sc(Decimal::from(8), 0), zero, zero, zero, zero]
         );
         assert_eq!(
             brands[2].totals,
-            [zero, (Decimal::from(6), 1), zero, zero, zero]
+            [zero, sc(Decimal::from(6), 1), zero, zero, zero]
         );
         assert_eq!(
             brands[3].totals,
-            [zero, zero, zero, (Decimal::from(3), 1), zero]
+            [zero, zero, zero, sc(Decimal::from(3), 1), zero]
         );
         assert_eq!(
             brands[4].totals,
-            [zero, zero, zero, zero, (Decimal::from(4), 1)]
+            [zero, zero, zero, zero, sc(Decimal::from(4), 1)]
         );
         assert_eq!(
             summary.groups()[1].brands[0].totals[4],
-            (Decimal::from(8), 1)
+            sc(Decimal::from(8), 1)
         );
         assert_eq!(summary.groups()[2].brands[0].totals, [zero; 5]);
         assert_eq!(summary.groups()[3].brands[0].totals, [zero; 5]);
@@ -656,10 +788,12 @@ mod tests {
             unup: zero,
         };
         for row in metrics.amount_ratios() {
-            assert_eq!(
-                row,
-                (Decimal::ZERO, 0.0, Decimal::ZERO, 0.0, Decimal::ZERO, 0.0,)
-            );
+            assert_eq!(row.app_amt, Decimal::ZERO);
+            assert_eq!(row.app_pct, 0.0);
+            assert_eq!(row.dig_amt, Decimal::ZERO);
+            assert_eq!(row.dig_pct, 0.0);
+            assert_eq!(row.tot_amt, Decimal::ZERO);
+            assert_eq!(row.tot_pct, 0.0);
         }
     }
 
@@ -743,16 +877,35 @@ mod tests {
 
         // 1. App failed sorted by product name (INV1 "海尔冰箱" < INV2 "美的空调" < empty)
         assert_eq!(datasets.app_failed.len(), 3);
-        assert_eq!(datasets.app_failed[0].extra1, "海尔冰箱");
-        assert_eq!(datasets.app_failed[1].extra1, "美的空调");
-        assert_eq!(datasets.app_failed[2].extra1, "");
+        assert_eq!(
+            datasets.app_failed[0].extra,
+            FailedUploadExtra::ApplianceProductName("海尔冰箱".into())
+        );
+        assert_eq!(
+            datasets.app_failed[1].extra,
+            FailedUploadExtra::ApplianceProductName("美的空调".into())
+        );
+        assert_eq!(
+            datasets.app_failed[2].extra,
+            FailedUploadExtra::ApplianceProductName("".into())
+        );
 
         // 2. Dig failed extracts IMEI1 and IMEI2 in original order
         assert_eq!(datasets.dig_failed.len(), 2);
-        assert_eq!(datasets.dig_failed[0].extra1, "EM1");
-        assert_eq!(datasets.dig_failed[0].extra2, Some("EM2".into()));
-        assert_eq!(datasets.dig_failed[1].extra1, "EM5");
-        assert_eq!(datasets.dig_failed[1].extra2, Some("EM6".into()));
+        assert_eq!(
+            datasets.dig_failed[0].extra,
+            FailedUploadExtra::DigitalImei {
+                imei1: "EM1".into(),
+                imei2: "EM2".into(),
+            }
+        );
+        assert_eq!(
+            datasets.dig_failed[1].extra,
+            FailedUploadExtra::DigitalImei {
+                imei1: "EM5".into(),
+                imei2: "EM6".into(),
+            }
+        );
 
         // 3. Invoices sorted by doc_no ascending with empty last (DOC1 < DOC2 < empty)
         assert_eq!(datasets.invoices.rows.len(), 3);

@@ -1,23 +1,27 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use std::rc::Rc;
 
-use super::{Category, MultiValueIndex, invoice, receipts, unionpay};
+use super::refund::{self, RefundSubsidyIndices};
+use super::uploaded::{self, UploadedStatusIndex};
+use super::{MatchStats, MultiValueIndex, SubsidyGroup, invoice, receipts, unionpay};
 use crate::model::{ProcessError, Table, Value};
 
-/// 命中分类互斥；不同阶段的歧义可重复计数。
-#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MatchStats {
-    pub hits: [usize; 4],
-    pub ambiguous: [usize; 4],
+#[derive(Default, Debug)]
+struct GroupInputs {
+    uploaded: Option<Rc<UploadedStatusIndex>>,
+    refund: Option<Rc<RefundSubsidyIndices>>,
+    pending_refund: Option<Table>,
+    pending_uploaded: Option<Table>,
 }
 
 #[derive(Default, Debug)]
 pub struct PipelineContext {
-    tables: HashMap<Category, Table>,
     authority: Option<Rc<HashSet<String>>>,
     invoices: Option<Rc<MultiValueIndex>>,
     receipts: Option<Rc<MultiValueIndex>>,
+    appliance: GroupInputs,
+    digital: GroupInputs,
     stats: Option<MatchStats>,
 }
 
@@ -26,20 +30,70 @@ impl PipelineContext {
         Self::default()
     }
 
-    pub fn store_table(&mut self, category: Category, table: Table) {
-        self.tables.insert(category, table);
+    fn group(&self, group: SubsidyGroup) -> &GroupInputs {
+        match group {
+            SubsidyGroup::Appliance => &self.appliance,
+            SubsidyGroup::Digital => &self.digital,
+        }
     }
 
-    pub fn get_table(&self, category: Category) -> Option<Table> {
-        self.tables.get(&category).cloned()
+    fn group_mut(&mut self, group: SubsidyGroup) -> &mut GroupInputs {
+        match group {
+            SubsidyGroup::Appliance => &mut self.appliance,
+            SubsidyGroup::Digital => &mut self.digital,
+        }
     }
 
-    /// 只读借用缓存中的表并执行闭包，避免整表深拷贝。
-    pub fn with_table<F, R>(&self, category: Category, f: F) -> Option<R>
-    where
-        F: FnOnce(&Table) -> R,
-    {
-        self.tables.get(&category).map(f)
+    pub(crate) fn refund_subsidy_indices(
+        &mut self,
+        group: SubsidyGroup,
+        input_dir: &Path,
+    ) -> Result<Rc<RefundSubsidyIndices>, ProcessError> {
+        if let Some(index) = &self.group(group).refund {
+            return Ok(Rc::clone(index));
+        }
+        let table = refund::load_refund_table(group, input_dir)?;
+        let index = Rc::new(RefundSubsidyIndices::from_table(&table));
+        let cached = self.group_mut(group);
+        cached.refund = Some(Rc::clone(&index));
+        cached.pending_refund = Some(table);
+        Ok(index)
+    }
+
+    pub(crate) fn store_refund_indices(
+        &mut self,
+        group: SubsidyGroup,
+        indices: RefundSubsidyIndices,
+    ) {
+        self.group_mut(group).refund = Some(Rc::new(indices));
+    }
+
+    pub(crate) fn take_refund_table(&mut self, group: SubsidyGroup) -> Option<Table> {
+        self.group_mut(group).pending_refund.take()
+    }
+
+    pub(crate) fn uploaded_status_index(
+        &mut self,
+        group: SubsidyGroup,
+        input_dir: &Path,
+    ) -> Result<Rc<UploadedStatusIndex>, ProcessError> {
+        if let Some(index) = &self.group(group).uploaded {
+            return Ok(Rc::clone(index));
+        }
+        let table = uploaded::load_uploaded_table(group, input_dir, self)?;
+        let index = Rc::new(UploadedStatusIndex::from_table(&table));
+        let cached = self.group_mut(group);
+        cached.uploaded = Some(Rc::clone(&index));
+        cached.pending_uploaded = Some(table);
+        Ok(index)
+    }
+
+    pub(crate) fn store_uploaded_index(&mut self, group: SubsidyGroup, index: UploadedStatusIndex) {
+        self.group_mut(group).uploaded = Some(Rc::new(index));
+    }
+
+    pub(crate) fn take_uploaded_table(&mut self, group: SubsidyGroup) -> Option<Table> {
+        self.group_mut(group).pending_uploaded.take()
     }
 
     pub(crate) fn authority(
@@ -148,15 +202,25 @@ impl PipelineContext {
         if let Some(stats) = self.stats {
             println!(
                 "匹配统计：收款单备注 {}，上传参考号 {}，上传发票号 {}，未上传 {}；合计 {}。",
-                stats.hits[0],
-                stats.hits[1],
-                stats.hits[2],
-                stats.hits[3],
-                stats.hits.iter().sum::<usize>()
+                stats.hits.receipts,
+                stats.hits.uploaded_reference,
+                stats.hits.uploaded_invoice,
+                stats.hits.unuploaded,
+                stats.hits.total()
             );
             println!(
                 "歧义记录：参考号提取 {}，发票号码 {}，收款单备注 {}，上传状态 {}（不同阶段可重复计数）。",
-                stats.ambiguous[0], stats.ambiguous[1], stats.ambiguous[2], stats.ambiguous[3]
+                stats.ambiguous.reference,
+                stats.ambiguous.invoice,
+                stats.ambiguous.receipts,
+                stats.ambiguous.uploaded
+            );
+            println!(
+                "未上传原因：关联键为空 {}，候选冲突 {}，查无非空状态 {}；合计 {}（冲突优先归类）。",
+                stats.unuploaded.empty_keys,
+                stats.unuploaded.candidate_conflict,
+                stats.unuploaded.no_status,
+                stats.unuploaded.total()
             );
         }
     }
@@ -172,45 +236,11 @@ fn is_valid_ref_no(value: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn sample_table() -> Table {
-        Table {
-            columns: vec![],
-            rows: vec![crate::model::Row {
-                values: vec![],
-                fill: None,
-            }],
-        }
-    }
-
-    #[test]
-    fn stores_and_retrieves_table() {
-        let mut ctx = PipelineContext::new();
-        let table = sample_table();
-        assert!(ctx.get_table(Category::Invoice).is_none());
-        ctx.store_table(Category::Invoice, table.clone());
-        assert_eq!(
-            ctx.get_table(Category::Invoice).map(|t| t.rows.len()),
-            Some(1)
-        );
-    }
-
-    #[test]
-    fn with_table_borrows_without_cloning() {
-        let mut ctx = PipelineContext::new();
-        let table = sample_table();
-        ctx.store_table(Category::RefundAppliance, table);
-        let row_count = ctx.with_table(Category::RefundAppliance, |t| t.rows.len());
-        assert_eq!(row_count, Some(1));
-    }
-
     #[test]
     fn records_and_retrieves_match_stats() {
         let mut ctx = PipelineContext::new();
         assert!(ctx.stats().is_none());
-        let stats = MatchStats {
-            hits: [10, 20, 30, 40],
-            ambiguous: [1, 2, 3, 4],
-        };
+        let stats = MatchStats::default();
         ctx.record_stats(stats);
         assert_eq!(ctx.stats(), Some(stats));
     }

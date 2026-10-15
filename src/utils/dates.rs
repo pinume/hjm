@@ -21,20 +21,48 @@ pub fn parse_yyyymmdd(text: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(text, "%Y%m%d").ok()
 }
 
-/// 解析`yyyy-mm-dd`、`yyyy/mm/dd`（可选带`HH:MM:SS`时间部分）文本为日期时间；
+/// 解析标准横线/斜线日期、中文年月日、点号分隔日期、紧凑日期加时间文本为日期时间；
+/// 容错过滤首位误触单数字前缀（如“2 2026年04月24日”）；
 /// 无时间部分时以当天零点补齐。
 pub fn parse_date_text(text: &str) -> Option<NaiveDateTime> {
-    const DATETIME_FORMATS: &[&str] = &["%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S"];
-    const DATE_FORMATS: &[&str] = &["%Y-%m-%d", "%Y/%m/%d"];
+    const DATETIME_FORMATS: &[&str] = &[
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y%m%d %H:%M",
+        "%Y%m%d %H:%M:%S",
+    ];
+    const DATE_FORMATS: &[&str] = &[
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%Y年%m月%d日",
+        "%Y.%m.%d",
+        "%Y.%m%d",
+    ];
 
-    let text = text.trim();
+    let trimmed = text.trim();
+    let candidate = if let Some((prefix, rest)) = trimmed.split_once(char::is_whitespace) {
+        let rest = rest.trim_start();
+        if prefix.len() == 1
+            && prefix.chars().all(|c| c.is_ascii_digit())
+            && rest
+                .get(..4)
+                .is_some_and(|year| year.bytes().all(|b| b.is_ascii_digit()))
+        {
+            rest
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+
     for format in DATETIME_FORMATS {
-        if let Ok(dt) = NaiveDateTime::parse_from_str(text, format) {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(candidate, format) {
             return Some(dt);
         }
     }
     for format in DATE_FORMATS {
-        if let Ok(date) = NaiveDate::parse_from_str(text, format) {
+        if let Ok(date) = NaiveDate::parse_from_str(candidate, format) {
             return Some(date.and_hms_opt(0, 0, 0).unwrap());
         }
     }
@@ -83,6 +111,8 @@ mod tests {
             .unwrap();
         assert_eq!(parse_date_text("2026-07-28"), Some(expected));
         assert_eq!(parse_date_text("2026/07/28"), Some(expected));
+        assert_eq!(parse_date_text("2026年7月28日"), Some(expected));
+        assert_eq!(parse_date_text("2026年07月28日"), Some(expected));
     }
 
     #[test]
@@ -92,10 +122,47 @@ mod tests {
             .and_hms_opt(13, 5, 9)
             .unwrap();
         assert_eq!(parse_date_text("2026-07-28 13:05:09"), Some(expected));
+        assert_eq!(parse_date_text("20260728 13:05:09"), Some(expected));
+        assert_eq!(
+            parse_date_text("20260303 17:19"),
+            NaiveDate::from_ymd_opt(2026, 3, 3)
+                .unwrap()
+                .and_hms_opt(17, 19, 0)
+        );
+    }
+
+    #[test]
+    fn parses_dotted_dates_and_strips_leading_typo_prefix() {
+        let expected_0101 = NaiveDate::from_ymd_opt(2026, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        assert_eq!(parse_date_text("2026.0101"), Some(expected_0101));
+        assert_eq!(parse_date_text("2026.01.01"), Some(expected_0101));
+
+        let expected_0327 = NaiveDate::from_ymd_opt(2026, 3, 27)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        assert_eq!(parse_date_text("2 2026年03月27日"), Some(expected_0327));
+
+        let expected_0721 = NaiveDate::from_ymd_opt(2026, 7, 21)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        assert_eq!(parse_date_text("2 2026年07月21日"), Some(expected_0721));
+
+        let expected_0424 = NaiveDate::from_ymd_opt(2026, 4, 24)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        assert_eq!(parse_date_text("2 2026年04月24日"), Some(expected_0424));
     }
 
     #[test]
     fn rejects_unrecognized_text() {
-        assert_eq!(parse_date_text("2026年7月28日"), None);
+        assert_eq!(parse_date_text("2026年02月30日"), None);
+        assert_eq!(parse_date_text("invalid date"), None);
+        assert_eq!(parse_date_text("12345"), None);
     }
 }

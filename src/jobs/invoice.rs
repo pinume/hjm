@@ -6,7 +6,7 @@ use chrono::NaiveDate;
 use crate::io::paths::list_xlsx_files;
 use crate::io::xlsx_reader::open_sheets;
 use crate::model::{Column, ColumnType, Fill, ProcessError, Row, Table, Value};
-use crate::utils::product::{ProductIdentity, normalize_invoice_brand};
+use crate::utils::product::ProductIdentity;
 use crate::utils::{dates, doc_no};
 
 use super::{
@@ -117,71 +117,6 @@ fn clean_product_name(raw: &str) -> String {
         .to_string()
 }
 
-/// Extract the brand and category from invoice names; keep the full cleaned name intact.
-/// Unknown categories and names without a confirmed brand remain blank.
-fn split_product_name(name: &str) -> ProductIdentity {
-    if let Some(identity) = ProductIdentity::from_invoice_catalog(name) {
-        return identity;
-    }
-    let Some((brand, remainder)) = name.split_once('-') else {
-        let category =
-            ProductIdentity::invoice_category_from_unseparated_name(name).unwrap_or_default();
-        return ProductIdentity::new(brand_from_unseparated_name(name), category);
-    };
-    let (category_token, _) = remainder.split_once('-').unwrap_or((remainder, ""));
-    let category = ProductIdentity::invoice_category(category_token).unwrap_or_default();
-    ProductIdentity::new(normalize_invoice_brand(brand), category)
-}
-
-fn brand_from_unseparated_name(name: &str) -> String {
-    match name {
-        "VIXO手机" | "手机vivo" => return "vivo".to_string(),
-        "IQ手机" | "iQ手机" | "IQ00国产手机" => return "iqoo".to_string(),
-        "Reno手机" => return "OPPO".to_string(),
-        _ => {}
-    }
-    let lower_name = name.to_ascii_lowercase();
-    [
-        "OPPO",
-        "vivo",
-        "iqoo",
-        "HUAWEI",
-        "华为",
-        "荣耀",
-        "一加",
-        "小米",
-        "红米",
-        "苹果",
-        "小天才",
-        "学而思",
-        "作业帮",
-        "海尔",
-        "卡萨帝",
-        "美的",
-        "美菱",
-        "小天鹅",
-        "创维",
-        "TCL",
-        "海信",
-        "晶弘",
-        "奥克斯",
-        "格力",
-        "西门子",
-        "欧意",
-        "沁园",
-        "方太",
-        "长城",
-        "COLMO",
-        "统帅",
-        "步步高",
-        "老板",
-    ]
-    .into_iter()
-    .find(|brand| lower_name.starts_with(&brand.to_ascii_lowercase()))
-    .map(normalize_invoice_brand)
-    .unwrap_or_default()
-}
-
 fn is_abnormal(record: &InvoiceRecord) -> bool {
     record.invoice_type == "红票"
         || record.invoice_status == "已红冲"
@@ -196,10 +131,6 @@ impl Job for InvoiceJob {
     }
 
     fn title(&self) -> &'static str {
-        "发票明细"
-    }
-
-    fn output_stem(&self) -> &'static str {
         "发票明细"
     }
 
@@ -271,7 +202,7 @@ pub(crate) fn load_records(input_dir: &Path) -> Result<Vec<InvoiceRecord>, Proce
         let buyer_name = text_at(10, "购方名称")?;
         let raw_product_name = text_at(16, "主要商品名称")?;
         let product_name = clean_product_name(&raw_product_name);
-        let product_identity = split_product_name(&product_name);
+        let product_identity = ProductIdentity::from_invoice_name(&product_name);
         let remark = text_at(21, "备注信息")?;
         let invoice_status = text_at(28, "开票状态")?;
 
@@ -395,47 +326,6 @@ mod tests {
         assert_eq!(clean_product_name("无星号商品"), "无星号商品");
     }
 
-    #[test]
-    fn newly_named_mobile_products_use_the_confirmed_digital_category() {
-        for category in [
-            "手机",
-            "手机串号",
-            "平板",
-            "平板电脑",
-            "智能手环",
-            "手表",
-            "智能眼镜",
-            "智能耳机",
-        ] {
-            // 第3.3节：新增型号不在精确名称表中时，仍按用户确认的类别归数码。
-            let name = format!("华为-{category}-新增型号");
-            assert_eq!(
-                split_product_name(&name),
-                ProductIdentity::new("华为", "数码")
-            );
-        }
-        assert_eq!(
-            split_product_name("华为-未核实新类别-新增型号"),
-            ProductIdentity::new("华为", "")
-        );
-        assert_eq!(
-            split_product_name("联想-电脑-新增型号"),
-            ProductIdentity::new("联想", "电脑")
-        );
-        assert_eq!(
-            split_product_name("VIVO(步步高)-手机-新增型号"),
-            ProductIdentity::new("vivo", "数码")
-        );
-        assert_eq!(
-            split_product_name("OPPO（本德）-平板电脑-新增型号"),
-            ProductIdentity::new("OPPO", "数码")
-        );
-        assert_eq!(
-            split_product_name("华为（移动）-电脑-新增型号"),
-            ProductIdentity::new("华为", "电脑")
-        );
-    }
-
     fn write_invoice_workbook(path: &Path, sheet_name: &str, rows: &[[&str; 30]]) {
         let mut workbook = Workbook::new();
         let sheet = workbook.add_worksheet();
@@ -524,6 +414,93 @@ mod tests {
             assert_eq!(
                 table.rows[0].values[7],
                 Value::Text(expected.into()),
+                "{remark}"
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn purchase_time_and_receipt_labels_preserve_extraction_guards() {
+        let dir = unique_temp_path("invoice-purchase-time-receipt-labels");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 第3.4节：源数据同义标签只扩展识别，不放宽日期、长度与唯一性规则。
+        let cases = [
+            (
+                "购机时间：2026年3月19日  收款单号:ZFMT000014",
+                Some("260319ZFMT000014"),
+            ),
+            (
+                "购机时间 ：2026年3月8日  收款单号ZFMT000007",
+                Some("260308ZFMT000007"),
+            ),
+            (
+                "开具2026年2月27日购物发票 ,销售日期2026年2月27日 收款单号：ZFMT000031收款方式：微信支付",
+                Some("260227ZFMT000031"),
+            ),
+            (
+                "购机日期：2025-08-24 收款单号：ZGE8000004",
+                Some("250824ZGE8000004"),
+            ),
+            (
+                "购机时间：2026-01-21 收款单号：收款ZGX8000034",
+                Some("260121ZGX8000034"),
+            ),
+            (
+                "销售日期：2026-03-19 购机时间：2026-03-19 单据号：ZFMT000014 收款单号：ZFMT000014",
+                Some("260319ZFMT000014"),
+            ),
+            (
+                "销售日期：2026-03-18 购机时间：2026-03-19 收款单号：ZFMT000014",
+                None,
+            ),
+            (
+                "购机时间：2026-03-19 单据号：ZFMT000014 收款单号：ZFMT000015",
+                None,
+            ),
+            ("开具2026年3月19日购物发票 收款单号：ZFMT000014", None),
+            ("购机时间：3月19日 收款单号：ZFMT000014", None),
+            ("购机时间：2026-03-19 收款单号：ZFMT00014", None),
+            ("购机时间：2026-02-30 收款单号：ZFMT000014", None),
+            ("购机时间：2026-03-190 收款单号：ZFMT000014", None),
+            ("销售日期：2026-12-310 单据号：ZFMT000014", None),
+            ("销售日期：202-03-19 单据号：ZFMT000014", None),
+            ("销售日期：20260-03-19 单据号：ZFMT000014", None),
+            ("销售日期：2026-003-19 单据号：ZFMT000014", None),
+            (
+                "销售日期：2026-03-19 购机时间：2026-02-30 收款单号：ZFMT000014",
+                None,
+            ),
+            (
+                "购机时间：2026-02-30 销售日期：2026-03-19 收款单号：ZFMT000014",
+                None,
+            ),
+            (
+                "销售日期：2026-03-19 购机日期：3月19日 收款单号：ZFMT000014",
+                None,
+            ),
+            (
+                "销售日期：2026-03-19 购机时间：未知 收款单号：ZFMT000014",
+                None,
+            ),
+        ];
+        for (remark, expected) in cases {
+            write_invoice_workbook(
+                &dir.join("发票_20261013.xlsx"),
+                "发票_20261013",
+                &[sample_source_row(
+                    "2026-10-13 10:00:00",
+                    "蓝票",
+                    "开票完成",
+                    remark,
+                    "OPPO手机",
+                )],
+            );
+            let table = InvoiceJob.run(&dir).unwrap();
+            assert_eq!(table.rows[0].values[5], Value::Text(remark.into()));
+            assert_eq!(
+                table.rows[0].values[7],
+                expected.map_or(Value::Empty, |v| Value::Text(v.into())),
                 "{remark}"
             );
         }

@@ -1,11 +1,15 @@
-# subsidy
+# HJM (哈基米)
 
-Rust 国补数据处理工具：输入原始 Excel 文件夹路径，自动完成8类清洗并生成报表。
+<p align="center">
+  <img src="docs/assets/hjm_icon.jpg" width="160" alt="HJM App Icon" />
+</p>
+
+Rust 国补数据处理工具（HJM / 原名 `subsidy`）：输入原始 Excel 文件夹路径，自动完成8类清洗并生成报表。
 
 当前处理未来城店：数码商户号 `89813014812B04P`，家电电脑商户号 `89813015722APTB`。
 
 ```bash
-cargo run --locked
+cargo run --release --locked
 ```
 
 原始文件只读；明细与报表分别写入原始目录同级的`国补明细/`和`国补报表/`。

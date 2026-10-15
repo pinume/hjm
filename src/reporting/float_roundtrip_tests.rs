@@ -177,11 +177,17 @@ fn zero_amount_and_count_summary_cell_stays_zero_after_roundtrip() {
         };
         let sheet = SheetData::new(roundtrip_table(&table, &format!("cell-{index}")));
         let summary = CategoryBrandSummary::from_sales(&sheet).unwrap();
-        let (amount, count) = summary.groups()[0].brands[0].totals[0];
-        let shows_dash = amount.is_zero() && count == 0;
-        eprintln!("[汇总格] {name}: 金额 {amount}，数量 {count}，显示“-”={shows_dash}");
+        let total = summary.groups()[0].brands[0].totals[0];
+        let shows_dash = total.is_empty();
+        eprintln!(
+            "[汇总格] {name}: 金额 {}，数量 {}，显示“-”={shows_dash}",
+            total.amount, total.count
+        );
         if !shows_dash {
-            failures.push(format!("{name}: 金额 {amount}，数量 {count}"));
+            failures.push(format!(
+                "{name}: 金额 {}，数量 {}",
+                total.amount, total.count
+            ));
         }
     }
     assert!(
