@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use subsidy::io::publisher;
-use subsidy::model::ProcessError;
+use hjm::io::publisher;
+use hjm::model::ProcessError;
 
 fn temp_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(

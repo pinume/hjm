@@ -184,7 +184,7 @@ fn field(path: &Path, sheet: usize, row: usize, name: &str) -> Data {
 #[test]
 fn cli_cleans_all_eight_categories_and_publishes_two_excel_reports() {
     let root = std::env::temp_dir().join(format!(
-        "subsidy-full-{}-{}",
+        "hjm-full-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -218,7 +218,7 @@ fn cli_cleans_all_eight_categories_and_publishes_two_excel_reports() {
             (path, bytes)
         })
         .collect();
-    let mut cli = Command::new(env!("CARGO_BIN_EXE_subsidy"))
+    let mut cli = Command::new(env!("CARGO_BIN_EXE_hjm"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -304,7 +304,7 @@ fn cli_cleans_all_eight_categories_and_publishes_two_excel_reports() {
 #[test]
 fn cli_warns_on_duplicate_business_key_conflicts_and_exits_successfully() {
     let root = std::env::temp_dir().join(format!(
-        "subsidy-conflict-{}-{}",
+        "hjm-conflict-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -342,7 +342,7 @@ fn cli_warns_on_duplicate_business_key_conflicts_and_exits_successfully() {
     );
     write_common_sources(&input);
 
-    let mut cli = Command::new(env!("CARGO_BIN_EXE_subsidy"))
+    let mut cli = Command::new(env!("CARGO_BIN_EXE_hjm"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -270,6 +270,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
+name = "hjm"
+version = "0.1.0"
+dependencies = [
+ "calamine",
+ "chrono",
+ "quick-xml",
+ "regex",
+ "rust_decimal",
+ "rust_xlsxwriter",
+ "thiserror",
+ "winresource",
+ "zip",
+]
+
+[[package]]
 name = "iana-time-zone"
 version = "0.1.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -633,20 +648,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
-name = "subsidy"
-version = "0.1.0"
-dependencies = [
- "calamine",
- "chrono",
- "quick-xml",
- "regex",
- "rust_decimal",
- "rust_xlsxwriter",
- "thiserror",
- "zip",
-]
-
-[[package]]
 name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -729,6 +730,12 @@ name = "unicode-ident"
 version = "1.0.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab72a15cf68d77cb0987d3684aa8a45c5ef827e8cb49ee2f30bfd7ba2feb519f"
+
+[[package]]
+name = "version_check"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "wasi"
@@ -857,6 +864,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "winresource"
+version = "0.1.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2bc6d36480b829272a5bdabf08e6dca8004761c1da7e35efef800540c66221b"
+dependencies = [
+ "version_check",
 ]
 
 [[package]]

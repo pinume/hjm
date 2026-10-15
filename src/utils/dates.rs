@@ -8,11 +8,6 @@ pub fn datetime_from_serial(serial: f64) -> Option<NaiveDateTime> {
     datetime.with_nanosecond(0)
 }
 
-/// Excel 日期序列值转换为日期（丢弃时间部分）。
-pub fn date_from_serial(serial: f64) -> Option<NaiveDate> {
-    datetime_from_serial(serial).map(|dt| dt.date())
-}
-
 /// 解析`yyyymmdd`（8 位数字文本）为日期。
 pub fn parse_yyyymmdd(text: &str) -> Option<NaiveDate> {
     if text.len() != 8 || !text.bytes().all(|b| b.is_ascii_digit()) {
@@ -76,7 +71,7 @@ mod tests {
     #[test]
     fn serial_converts_known_date() {
         // 45943 = 2025-10-13（对照 calamine 文档中的示例）。
-        let date = date_from_serial(45943.0).unwrap();
+        let date = datetime_from_serial(45943.0).unwrap().date();
         assert_eq!(date, NaiveDate::from_ymd_opt(2025, 10, 13).unwrap());
     }
 

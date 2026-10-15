@@ -1,15 +1,15 @@
 use calamine::{Reader, open_workbook_auto};
+use hjm::{generate_store_finance_workbook, generate_summary_workbook};
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
-use subsidy::{generate_store_finance_workbook, generate_summary_workbook};
 
 #[path = "fixtures/acceptance_checks.rs"]
 mod acceptance_checks;
 
 #[test]
-#[ignore = "requires a current source dataset via SUBSIDY_SOURCE_DIR/COMBINE_SOURCE_DIR or ../data"]
+#[ignore = "requires a current source dataset via HJM_SOURCE_DIR/COMBINE_SOURCE_DIR or ../data"]
 fn test_current_source_acceptance() {
-    let source_dir = std::env::var_os("SUBSIDY_SOURCE_DIR")
+    let source_dir = std::env::var_os("HJM_SOURCE_DIR")
         .or_else(|| std::env::var_os("COMBINE_SOURCE_DIR"))
         .map(std::path::PathBuf::from)
         .or_else(|| {
@@ -25,11 +25,9 @@ fn test_current_source_acceptance() {
                 }
             }
         })
-        .expect(
-            "set SUBSIDY_SOURCE_DIR/COMBINE_SOURCE_DIR or ensure ../data contains the raw dataset",
-        );
+        .expect("set HJM_SOURCE_DIR/COMBINE_SOURCE_DIR or ensure ../data contains the raw dataset");
     let root = std::env::temp_dir().join(format!(
-        "subsidy-acceptance-{}-{}",
+        "hjm-acceptance-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -145,7 +143,7 @@ fn test_current_source_acceptance() {
 }
 
 fn run_cli(root: &std::path::Path) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_subsidy"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hjm"))
         .current_dir(root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

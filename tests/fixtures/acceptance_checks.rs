@@ -2,13 +2,13 @@
 //! This module never calls cleaning jobs, reconcilers, or report metric calculators.
 use calamine::{Data, DataType, Reader, open_workbook_auto};
 use chrono::NaiveDate;
+use hjm::utils::merchant::{APPLIANCE_COMPUTER_MERCHANT_NO, DIGITAL_MERCHANT_NO};
 use quick_xml::{Reader as XmlReader, events::Event};
 use rust_decimal::Decimal;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use subsidy::utils::merchant::{APPLIANCE_COMPUTER_MERCHANT_NO, DIGITAL_MERCHANT_NO};
 
 const PINK: &str = "FFFFC7CE";
 const YELLOW: &str = "FFFFEB9C";
@@ -1724,7 +1724,7 @@ mod oracle_tests {
             &[&["REF", "DOC", "电脑", "品牌", "销售产品"]],
         );
         let path = std::env::temp_dir().join(format!(
-            "subsidy-finance-oracle-{}-{}.xlsx",
+            "hjm-finance-oracle-{}-{}.xlsx",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

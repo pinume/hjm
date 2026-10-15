@@ -1128,8 +1128,7 @@ mod tests {
             ])]),
         )
         .unwrap();
-        let path =
-            std::env::temp_dir().join(format!("subsidy-products-{}.xlsx", std::process::id()));
+        let path = std::env::temp_dir().join(format!("hjm-products-{}.xlsx", std::process::id()));
         workbook.save(&path).unwrap();
         let mut output = open_workbook_auto(&path).unwrap();
         let range = output

@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use calamine::{DataType, Reader, Xlsx, open_workbook};
+use hjm::jobs::{Job, unionpay::UnionPayJob};
+use hjm::model::Value;
 use rust_xlsxwriter::{Format, Workbook};
-use subsidy::jobs::{Job, unionpay::UnionPayJob};
-use subsidy::model::Value;
 use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 const HEADERS: [&str; 26] = [
@@ -39,7 +39,7 @@ const HEADERS: [&str; 26] = [
 
 fn input_dir(label: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
-        "subsidy-reading-{label}-{}-{}",
+        "hjm-reading-{label}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -106,7 +106,7 @@ fn use_1904_epoch(path: &Path) {
 }
 
 fn run_cli(input: &Path) -> String {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_subsidy"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hjm"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -1,6 +1,6 @@
-# subsidy 清洗模块架构
+# hjm 清洗模块架构
 
-本文描述当前项目的清洗模块边界；整体调度、报表共享与运行验证见[项目架构](architecture.md)，字段和匹配规则见[清洗业务规则](cleaning-rules.md)。清洗模块属于`subsidy`库，无独立`clean`入口。
+本文描述当前项目的清洗模块边界；整体调度、报表共享与运行验证见[项目架构](architecture.md)，字段和匹配规则见[清洗业务规则](cleaning-rules.md)。清洗模块属于`hjm`库，无独立`clean`入口。
 
 ## 模块与边界
 

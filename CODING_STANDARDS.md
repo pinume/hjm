@@ -1,6 +1,6 @@
-# subsidy Coding Standards
+# hjm Coding Standards
 
-This document defines the review invariants and architectural standards for the `subsidy` codebase. It is consulted by reviewer agents and humans during code review.
+This document defines the review invariants and architectural standards for the `hjm` codebase. It is consulted by reviewer agents and humans during code review.
 
 ## Review Invariants
 

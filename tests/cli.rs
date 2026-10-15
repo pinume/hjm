@@ -1,11 +1,11 @@
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 
+use hjm::io::xlsx_reader::{RawCell, open_sheets};
 use rust_xlsxwriter::Workbook;
-use subsidy::io::xlsx_reader::{RawCell, open_sheets};
 
 fn cli_result(input: &str) -> (bool, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_subsidy"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hjm"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

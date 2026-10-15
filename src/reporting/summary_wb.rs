@@ -669,7 +669,7 @@ mod status_tests {
 
     #[test]
     fn terminated_uploads_are_excluded_from_metrics_and_failure_records() {
-        let root = std::env::temp_dir().join(format!("subsidy-status-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("hjm-status-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let source = root.join("uploads.xlsx");
         let output = root.join("failures.xlsx");

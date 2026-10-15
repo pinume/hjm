@@ -1,4 +1,4 @@
-# subsidy 项目架构
+# hjm 项目架构
 
 ## 模块职责
 
@@ -75,14 +75,14 @@ cargo fmt --check
 cargo test --locked
 cargo clippy --locked --all-targets
 cargo build --release --locked
-./target/release/subsidy
+./target/release/hjm
 ```
 
 CLI 支持绝对路径、相对路径和成对引号包裹的路径；无效输入重新提示，EOF 正常退出。全部成功（包含存在业务键冲突告警但成功生成发布）或 EOF 的退出码为`0`，清洗失败、报表失败、跳过报表或无法开始处理为`1`。
 
-正式处理大量 Excel 时使用`cargo run --release --locked`或已构建的`target/release/subsidy`；默认开发构建没有启用编译优化，不能用其耗时代表发布版本性能。
+正式处理大量 Excel 时使用`cargo run --release --locked`或已构建的`target/release/hjm`；默认开发构建没有启用编译优化，不能用其耗时代表发布版本性能。
 
-原始文件只读。输出真实路径与源目录或另一输出目录重叠时拒绝处理。成功结果覆盖同名文件，失败保留对应旧文件；旧`cleaned/`和`subsidy_summary/`不迁移、不读取。完整流程通过`国补明细/.combine.lock`的标准库文件锁防止并发；锁文件保留，进程结束后操作系统释放锁。
+原始文件只读。输出真实路径与源目录或另一输出目录重叠时拒绝处理。成功结果覆盖同名文件，失败保留对应旧文件；旧英文输出目录不迁移、不读取。完整流程通过`国补明细/.combine.lock`的标准库文件锁防止并发；锁文件保留，进程结束后操作系统释放锁。
 
 财务最终匹配完成后，终端输出未提交、发票号为空及商品信息不完整的记录数；三项可重叠，不改变报表字段及匹配规则。
 

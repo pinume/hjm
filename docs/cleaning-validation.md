@@ -8,7 +8,7 @@
 
 独立验收从源备注计算预期匹配单据号，以源数据预期值判断重复、顺序与颜色；大类和品牌逐条对照发票核实清单，保留费用及待确认字段的预期空值。未收录的新名称须补充独立预期后完成验收，生产清洗兜底规则不变。故意清空／改错单据号、大类、品牌，填入应为空字段以及增加重复输出记录，均被验收拒绝。
 
-`cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`和`cargo test --locked`通过（214项单元测试、16项普通集成测试）。`SUBSIDY_SOURCE_DIR=../data cargo test --release --locked --test acceptance_test -- --ignored --nocapture`通过；覆盖8类清洗、两份报表、独立业务校验、公开接口一致性及源文件字节未变。
+`cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`和`cargo test --locked`通过（214项单元测试、16项普通集成测试）。`HJM_SOURCE_DIR=../data cargo test --release --locked --test acceptance_test -- --ignored --nocapture`通过；覆盖8类清洗、两份报表、独立业务校验、公开接口一致性及源文件字节未变。
 
 
 ## 审核问题修复验证
