@@ -1,7 +1,7 @@
 # HJM (哈基米)
 
 <p align="center">
-  <img src="docs/assets/hjm_icon.jpg" width="160" alt="HJM App Icon" />
+  <img src="docs/assets/hjm_icon.png" width="160" alt="HJM App Icon" />
 </p>
 
 Rust 国补数据处理工具（HJM）：输入原始 Excel 文件夹路径，自动完成8类清洗并生成报表。
